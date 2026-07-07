@@ -1,0 +1,228 @@
+---
+title: "HDB Service REST API Overview and Conventions"
+sidebarTitle: "Overview"
+description: "All HDB Service API routes are Next.js App Router handlers under /api. Learn base URL, response formats, error codes, pagination, and idempotency conventions."
+---
+
+All HDB Service API routes are implemented as [Next.js App Router route handlers](https://nextjs.org/docs/app/building-your-application/routing/route-handlers) located under `app/api/`. The API is consumed by the built-in React frontend (via React Query), but it can also be called directly by external tools, automation scripts, or third-party integrations. Every route is a standard HTTP endpoint that accepts and returns JSON.
+
+## Base URL
+
+| Environment | Base URL |
+|-------------|----------|
+| Production  | `https://your-deployment.vercel.app/api` |
+| Development | `http://localhost:3000/api` |
+
+Replace `your-deployment.vercel.app` with your actual Vercel deployment domain (or any custom domain you have configured).
+
+## Response Format
+
+All responses are JSON. Successful responses return the requested resource directly — either an object or an array, depending on the endpoint:
+
+```json
+// Single resource (GET /api/tickets/abc123)
+{
+  "id": "abc123",
+  "reason": "Equipo sin agua",
+  "status": "OPEN",
+  ...
+}
+
+// List resource (GET /api/tickets)
+{
+  "items": [...],
+  "total": 84,
+  "page": 1,
+  "limit": 50
+}
+```
+
+Error responses always return a JSON object with an `error` field and the appropriate HTTP status code:
+
+```json
+{
+  "error": "No autenticado"
+}
+```
+
+## HTTP Status Codes
+
+| Code | Meaning |
+|------|---------|
+| `200` | **Success** — used for successful `GET` and `PATCH` responses |
+| `201` | **Created** — used for successful `POST` responses that create a new resource |
+| `400` | **Bad Request** — missing or invalid fields in the request body or query |
+| `401` | **Unauthenticated** — no valid session cookie was found |
+| `403` | **Forbidden** — the authenticated user's role lacks the required permission |
+| `404` | **Not Found** — the requested resource does not exist |
+| `409` | **Conflict** — duplicate ID or a unique constraint violation in the database |
+| `500` | **Internal Server Error** — an unexpected error occurred on the server |
+
+## Pagination
+
+List endpoints (such as `GET /api/tickets`, `GET /api/dispensers`, `GET /api/users`) support cursor-free offset pagination via query parameters:
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `page` | `integer` | `1` | The page number to retrieve (1-based) |
+| `limit` | `integer` | `50` | Number of items per page |
+
+Paginated responses always include envelope metadata alongside the `items` array:
+
+```json
+{
+  "items": [ ... ],
+  "total": 312,
+  "page": 2,
+  "limit": 50
+}
+```
+
+```
+GET /api/tickets?page=2&limit=25
+```
+
+<Note>
+  The default `limit` is typically `50` across most list endpoints. Very large `limit` values may be clamped server-side.
+</Note>
+
+## Idempotency
+
+`POST` endpoints support idempotent retries through an idempotency key mechanism implemented in `lib/idempotency.ts`. To use it, include an `Idempotency-Key` header containing a UUID with your request. If the server has already processed a request with that key and it succeeded, it will return the cached response immediately without re-executing the handler — preventing duplicate records or double side effects on network retries.
+
+```bash
+curl -X POST https://your-deployment.vercel.app/api/tickets \
+  -H "Idempotency-Key: f47ac10b-58cc-4372-a567-0e02b2c3d479" \
+  -H "Content-Type: application/json" \
+  -d '{ "reason": "Equipo sin agua", "dispenserId": "disp_abc" }'
+```
+
+**How it works:**
+
+1. On receiving a `POST`, the server checks `prisma.idempotencyKey` for an existing record matching the key.
+2. If found, the cached response JSON is returned immediately with `200 OK`.
+3. If not found, the handler executes normally. On success, the response body is stored against the key in the database.
+4. If no `Idempotency-Key` header is provided, the request is processed normally with no deduplication.
+
+<Tip>
+  Generate a fresh UUID (e.g., `crypto.randomUUID()` in JavaScript or `uuid.uuid4()` in Python) for each _logical_ operation. Reuse the same key only when retrying the exact same request.
+</Tip>
+
+## Filtering
+
+List endpoints share a common set of query parameters for filtering results. Not every parameter applies to every endpoint — refer to the individual endpoint documentation for what is supported.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `status` | `string` | Filter by resource status (e.g., `OPEN`, `IN_PROGRESS`, `CLOSED`) |
+| `priority` | `string` | Filter by priority level (e.g., `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`) |
+| `plantId` | `string` | Filter resources belonging to a specific plant |
+| `clientId` | `string` | Filter resources belonging to a specific client |
+| `search` | `string` | Free-text search across relevant fields (IDs, names, descriptions) |
+| `page` | `integer` | Page number for pagination (default: `1`) |
+| `limit` | `integer` | Items per page (default: `50`) |
+
+```
+GET /api/tickets?status=OPEN&priority=CRITICAL&plantId=plant_xyz&page=1&limit=25
+```
+
+<Note>
+  Role-based data scoping is enforced automatically on the server. A `CLIENT_REQUESTER` user, for example, will only ever receive data from their assigned plant regardless of the `plantId` parameter passed.
+</Note>
+
+## Health Check
+
+A public health check endpoint is available to verify that the API and the database connection are alive. No authentication is required.
+
+```
+GET /api/health
+```
+
+**Response — Healthy (`200 OK`):**
+
+```json
+{
+  "status": "UP",
+  "timestamp": "2025-01-15T10:30:00.000Z",
+  "services": {
+    "database": "HEALTHY"
+  }
+}
+```
+
+**Response — Unhealthy (`500 Internal Server Error`):**
+
+```json
+{
+  "status": "DOWN",
+  "timestamp": "2025-01-15T10:30:00.000Z",
+  "error": "Database connection failed"
+}
+```
+
+The health check performs a live `SELECT 1` query against the PostgreSQL database via Prisma to confirm connectivity — it is not a static response.
+
+## Caching
+
+The Next.js middleware (`middleware.ts`) automatically applies `Cache-Control: no-store, private, max-age=0, must-revalidate` to all `GET /api/*` responses, ensuring external clients always receive fresh data. Client-side caching is managed by React Query with a `staleTime` of 5 minutes.
+
+## Endpoints Overview
+
+<CardGroup cols={2}>
+  <Card
+    title="Dispensers"
+    icon="glass-water"
+    href="/api/dispensers"
+  >
+    Manage the water dispenser fleet — catalog, status, assignments, and repair history.
+  </Card>
+  <Card
+    title="Tickets"
+    icon="ticket"
+    href="/api/tickets"
+  >
+    Create and track service incidents, support requests, and field interventions.
+  </Card>
+  <Card
+    title="Maintenance"
+    icon="wrench"
+    href="/api/maintenance"
+  >
+    Preventive maintenance schedules, checklists, visit records, and digital approvals.
+  </Card>
+  <Card
+    title="Inventory"
+    icon="package"
+    href="/api/inventory"
+  >
+    Stock levels for consumables and spare parts, transfers, and inter-plant debts.
+  </Card>
+  <Card
+    title="Clients & Plants"
+    icon="building"
+    href="/api/clients-plants"
+  >
+    Client accounts, operational plants, sectors, and location configuration.
+  </Card>
+  <Card
+    title="Users"
+    icon="users"
+    href="/api/users"
+  >
+    Platform user management, role assignments, and access control.
+  </Card>
+  <Card
+    title="Dashboard"
+    icon="chart-bar"
+    href="/api/dashboard"
+  >
+    Operational metrics, SLA performance, MTTR analytics, and fleet health summaries.
+  </Card>
+  <Card
+    title="Authentication"
+    icon="lock"
+    href="/api/authentication"
+  >
+    Session management, current user info, and password change endpoints.
+  </Card>
+</CardGroup>

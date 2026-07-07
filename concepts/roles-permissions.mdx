@@ -1,0 +1,213 @@
+---
+title: "Roles and Permissions in HDB Service"
+sidebarTitle: "Roles & Permissions"
+description: "HDB Service uses five roles — ADMIN, SUPERVISOR, TECHNICIAN, CLIENT_RESPONSIBLE, CLIENT_REQUESTER — each with a distinct permission set enforced at every API route."
+---
+
+HDB Service implements a **Role-Based Access Control (RBAC)** model defined in `lib/rbac.ts`. Every user is assigned exactly one of five roles. When an API route is called, `requirePermission()` in `lib/auth.ts` checks the caller's role against the required permission before any business logic runs — returning `401` for unauthenticated requests and `403` for insufficient permissions. The permission matrix is static and compiled into the server, so there is no per-user permission customization outside of role assignment.
+
+---
+
+## Roles
+
+### ADMIN
+
+The **platform administrator** — typically an HDB Service internal operator. ADMIN has unrestricted access to every feature, including cross-client configuration, SLA setup, and the ability to release blocked dispensers.
+
+**Permissions:**
+
+```
+clients:read          clients:write
+plants:read           plants:write
+sectors:read          sectors:write
+locations:read        locations:write
+dispensers:read       dispensers:write
+dispensers:assign     dispensers:status
+dispensers:release_block
+tickets:read          tickets:write
+tickets:assign        tickets:close
+maintenance:read      maintenance:write
+stock:read            stock:write         stock:transfer
+users:read            users:write
+dashboard:read
+reports:read          reports:generate
+audit:read
+sla_config:write
+notifications:read
+```
+
+---
+
+### SUPERVISOR
+
+The **operations manager or team lead**. A Supervisor has near-full access — covering all client, plant, dispenser, ticket, maintenance, stock, and user operations — but **cannot** write SLA configuration or release blocked dispensers.
+
+**Permissions:**
+
+```
+clients:read          clients:write
+plants:read           plants:write
+sectors:read          sectors:write
+locations:read        locations:write
+dispensers:read       dispensers:write
+dispensers:assign     dispensers:status
+tickets:read          tickets:write
+tickets:assign        tickets:close
+maintenance:read      maintenance:write
+stock:read            stock:write         stock:transfer
+users:read            users:write
+dashboard:read
+reports:read          reports:generate
+audit:read
+notifications:read
+```
+
+---
+
+### TECHNICIAN
+
+The **field technician** who performs hands-on dispenser maintenance and repair. A Technician can read and update dispenser status, manage their own tickets and maintenance checklists, and handle stock at the plant level. They cannot modify organizational structure (clients, plants, sectors) or manage other users.
+
+**Permissions:**
+
+```
+dispensers:read       dispensers:status
+locations:read
+tickets:read          tickets:write
+maintenance:read      maintenance:write
+stock:read            stock:write
+dashboard:read
+reports:read
+notifications:read
+```
+
+---
+
+### CLIENT_RESPONSIBLE
+
+The **client-side manager or point of contact** for a specific Client organization. They have read access to their entire Client's data, can raise and track tickets, view maintenance records and stock levels, generate reports, and — uniquely — release blocked dispensers via OC approval. They cannot modify organizational structure or manage platform users.
+
+**Permissions:**
+
+```
+clients:read
+plants:read
+sectors:read
+locations:read
+dispensers:read       dispensers:release_block
+tickets:read          tickets:write
+maintenance:read
+stock:read
+dashboard:read
+reports:read          reports:generate
+notifications:read
+```
+
+---
+
+### CLIENT_REQUESTER
+
+The **end user at a client site** — typically an employee who reports dispenser issues. Their access is scoped to only the Plants they have been explicitly assigned to via `UserPlantAccess`. They can read data and submit tickets but cannot close, assign, or configure anything.
+
+**Permissions:**
+
+```
+dispensers:read
+locations:read
+tickets:read          tickets:write
+maintenance:read
+stock:read
+dashboard:read
+reports:read
+notifications:read
+```
+
+---
+
+## Permission reference
+
+| Permission | Description |
+|---|---|
+| `clients:read` | View client records and their details |
+| `clients:write` | Create and update client records |
+| `plants:read` | View plants belonging to accessible clients |
+| `plants:write` | Create and update plants |
+| `sectors:read` | View sector definitions |
+| `sectors:write` | Create and update sectors |
+| `locations:read` | View locations within accessible plants |
+| `locations:write` | Create and update locations |
+| `dispensers:read` | View dispenser records, history, and status |
+| `dispensers:write` | Create and update dispenser records |
+| `dispensers:assign` | Assign or unassign dispensers to/from locations |
+| `dispensers:status` | Change a dispenser's operational status |
+| `dispensers:release_block` | Release a `BLOCKED` or `BLOCKED_WAITING_OC` dispenser back to service |
+| `tickets:read` | View tickets and their history |
+| `tickets:write` | Create and update tickets |
+| `tickets:assign` | Assign tickets to technicians |
+| `tickets:close` | Close or resolve tickets |
+| `maintenance:read` | View maintenance schedules and checklists |
+| `maintenance:write` | Create and complete maintenance records |
+| `stock:read` | View inventory stock levels |
+| `stock:write` | Update stock entries (add/consume items) |
+| `stock:transfer` | Initiate and approve stock transfers between plants |
+| `users:read` | View user accounts and their roles |
+| `users:write` | Create, update, and deactivate user accounts |
+| `dashboard:read` | Access the operational dashboard and metrics |
+| `reports:read` | View pre-generated reports |
+| `reports:generate` | Trigger report generation and exports |
+| `audit:read` | View the audit log of all system actions |
+| `sla_config:write` | Create or update SLA configuration for a client |
+| `notifications:read` | Read in-app and push notification history |
+
+---
+
+## Enforcement
+
+Every API route handler calls `requirePermission()` at its entry point before any database access. The function resolves the current Supabase Auth session, looks up the Prisma `User` record, and checks the role's permission set via `hasPermission()` from `lib/rbac.ts`.
+
+- If no valid session is found → returns `NextResponse` with **HTTP 401**.
+- If the session is valid but the role lacks the permission → returns `NextResponse` with **HTTP 403**.
+- Otherwise → returns the fully resolved `SessionUser` object.
+
+```typescript
+// Example from app/api/dispensers/route.ts
+const user = await requirePermission('dispensers:read');
+if (user instanceof NextResponse) return user;
+
+// At this point `user` is a SessionUser — safe to proceed
+const dispensers = await prisma.dispenser.findMany({
+  where: getDataFilter(user, { plantIdField: 'plantId' }),
+});
+```
+
+The `instanceof NextResponse` guard is the idiomatic pattern used throughout all route handlers to short-circuit on auth/permission failure.
+
+---
+
+## Data-level scoping
+
+Permission checks confirm *what kind of action* a user may perform, but they do not by themselves limit *which records* the user can see. That second layer is handled by `getDataFilter()` in `lib/auth.ts`, which returns a Prisma `WHERE` clause shaped to the caller's role:
+
+| Role | Scope |
+|------|-------|
+| `ADMIN` | No filter — sees all records across all clients |
+| `SUPERVISOR` | No filter — sees all records across all clients |
+| `TECHNICIAN` | No filter — sees all records (field access) |
+| `CLIENT_RESPONSIBLE` | Filtered to `clientId === user.clientId` |
+| `CLIENT_REQUESTER` | Filtered to `plantId IN user.plantIds` (assigned plants only) |
+
+```typescript
+// CLIENT_RESPONSIBLE sees their whole client
+getDataFilter(user, { clientIdField: 'clientId' })
+// → { clientId: 'clnt_abc123' }
+
+// CLIENT_REQUESTER sees only their assigned plants
+getDataFilter(user, { plantIdField: 'plantId' })
+// → { plantId: { in: ['plt_001', 'plt_002'] } }
+```
+
+This filter is applied to every `findMany`, `findUnique`, and aggregation query that touches client-owned data, making cross-client data leakage structurally impossible regardless of what a route handler does.
+
+<Warning>
+  **ADMIN** is the only role that holds both `sla_config:write` and `dispensers:release_block`. Supervisors can change dispenser status (`dispensers:status`) but **cannot** release a blocked unit — that action requires explicit CLIENT_RESPONSIBLE approval or ADMIN override. Similarly, only ADMIN can write SLA configuration for any client.
+</Warning>

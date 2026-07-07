@@ -1,0 +1,147 @@
+---
+title: "Email Templates: Customize Notification Emails"
+sidebarTitle: "Email Templates"
+description: "HDB Service stores email templates in the database, allowing administrators to customize subject lines and body content for welcome emails and ticket notifications."
+---
+
+HDB Service stores all outbound email templates in the PostgreSQL database rather than hard-coding them in source files. This means administrators can update subject lines, body copy, and variable placeholders at runtime through the API — without touching code or redeploying. Templates are fetched and rendered at send time by the `sendEmail` helper in `lib/email.ts`.
+
+---
+
+## Template Storage
+
+Email templates are persisted in the `EmailTemplate` table. The Prisma model is:
+
+```typescript
+model EmailTemplate {
+  id        String   @id @default(cuid())
+  type      String   @unique  // e.g. WELCOME_TEMP_PASSWORD, TICKET_CREATED
+  subject   String
+  body      String   @db.Text
+  active    Boolean  @default(true)
+  updatedAt DateTime @updatedAt
+}
+```
+
+| Field | Description |
+|---|---|
+| `type` | Unique string key that identifies the template. The application looks up templates by this value. |
+| `subject` | Email subject line. Supports the same `{{variable}}` placeholders as the body. |
+| `body` | Full email body. Supports HTML and plain text. Newlines are converted to `<br />` tags at send time. |
+| `active` | When `false`, `sendEmail` skips the template and no email is sent. |
+
+Templates are managed through the following API endpoints (requires `ADMIN` or `SUPERVISOR` role):
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/email-templates` | List all templates, ordered by `type`. |
+| `POST` | `/api/email-templates` | Create a new template. Body: `{ type, subject, body }`. |
+| `PATCH` | `/api/email-templates/[id]` | Update an existing template by ID. |
+
+---
+
+## Available Template Types
+
+### `WELCOME_TEMP_PASSWORD`
+
+Sent to a newly created user to deliver their temporary password. The recipient is expected to log in and change their password on first access.
+
+**Available variables:**
+
+| Variable | Description |
+|---|---|
+| `{{nombre}}` | The user's full name. |
+| `{{email}}` | The user's email address. |
+| `{{temp_password}}` | The system-generated temporary password. |
+
+---
+
+### `TICKET_CREATED`
+
+Sent to administrators and supervisors when a new support ticket is opened in the system.
+
+**Available variables:**
+
+| Variable | Description |
+|---|---|
+| `{{id_ticket}}` | The unique ticket ID. |
+| `{{motivo}}` | The reason/title of the ticket. |
+| `{{reportador_completo}}` | Full name of the user who reported the ticket. |
+| `{{primer_nombre_reportador}}` | First name of the reporter (used for a personal greeting). |
+| `{{prioridad}}` | Ticket priority: `LOW`, `MEDIUM`, `HIGH`, or `CRITICAL`. |
+| `{{planta}}` | The plant (facility) where the dispenser is located. |
+| `{{ubicacion}}` | The specific location within the plant. |
+
+**Sample body:**
+
+```
+Hola {{primer_nombre_reportador}},
+
+Se ha creado un nuevo ticket [{{id_ticket}}] en el sistema.
+
+Motivo: {{motivo}}
+Prioridad: {{prioridad}}
+Planta: {{planta}}
+Ubicación: {{ubicacion}}
+Reportado por: {{reportador_completo}}
+
+Ingresá al sistema para gestionar el ticket.
+```
+
+---
+
+## Variable Interpolation
+
+Template bodies and subject lines use double-brace syntax: `{{variable_name}}`. At send time, `sendEmail` in `lib/email.ts` replaces every placeholder with the corresponding value from the `variables` map passed by the caller:
+
+```typescript
+for (const [key, value] of Object.entries(variables)) {
+  const regex = new RegExp(`{${key}}`, 'g');
+  htmlBody = htmlBody.replace(regex, value || '');
+  subject = subject.replace(regex, value || '');
+}
+```
+
+If a variable is present in the map but has no value, it is replaced with an empty string. Placeholders for which no variable is supplied remain unchanged in the rendered output, so always verify that the `variables` object passed to `sendEmail` covers every placeholder used in a template.
+
+---
+
+## SMTP Configuration
+
+Email delivery is handled by **Nodemailer**. Rather than using environment variables for SMTP credentials, HDB Service reads them from `SystemSetting` rows in the database at send time. This allows credentials to be updated through the settings API (`GET /api/settings`) without a redeployment.
+
+The following `SystemSetting` keys are required for email delivery:
+
+| Key | Description |
+|---|---|
+| `SMTP_HOST` | Hostname of the outbound SMTP server (e.g. `smtp.gmail.com`). |
+| `SMTP_PORT` | Port number. Defaults to `587` if not set. Port `465` enables implicit TLS; all other ports use STARTTLS. |
+| `SMTP_USER` | SMTP authentication username (typically an email address). |
+| `SMTP_PASS` | SMTP authentication password or app-specific password. |
+| `SMTP_FROM_EMAIL` | The `From` address in outgoing emails. Falls back to `SMTP_USER` if not set. |
+| `SMTP_FROM_NAME` | The display name shown alongside the `From` address. Defaults to `HDB Service`. |
+| `SMTP_SECURE` | Optional. Set to `true` to force implicit TLS regardless of port. |
+
+If `SMTP_HOST`, `SMTP_USER`, or `SMTP_PASS` are missing, `sendEmail` logs a warning and returns `false` without throwing, so the caller will not crash but no email will be delivered.
+
+---
+
+## Disabling Templates
+
+Setting a template's `active` field to `false` prevents that email type from being sent without removing the template record or its configuration. This is useful for temporarily suppressing a notification category — for example, disabling `TICKET_CREATED` during a maintenance window — without losing the customized subject and body.
+
+```typescript
+// Inside sendEmail — lib/email.ts
+const template = await prisma.emailTemplate.findUnique({
+  where: { type: templateType }
+});
+
+if (!template) {
+  console.warn(`Plantilla de correo no encontrada para el tipo: ${templateType}`);
+  return false;
+}
+```
+
+<Note>
+  If a template is missing from the database or has `active: false`, HDB Service silently skips that email and returns `false` — it does not throw an error. Ensure templates are seeded during initial setup so that email notifications work from day one.
+</Note>

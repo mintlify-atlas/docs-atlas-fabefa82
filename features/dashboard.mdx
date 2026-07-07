@@ -1,0 +1,273 @@
+---
+title: "Analytics Dashboard: Fleet Health and SLA Metrics"
+sidebarTitle: "Dashboard"
+description: "The HDB Service dashboard surfaces real-time metrics — open tickets, SLA compliance, dispenser status breakdown, low-stock alerts, maintenance overdue counts, and MTTR analytics."
+---
+
+The HDB Service dashboard gives operators an at-a-glance view of the entire water dispenser fleet. It aggregates live data from tickets, dispensers, stock entries, and maintenance schedules into a set of purpose-built endpoints. All metrics are automatically scoped to the authenticated user's accessible plants and clients, so field technicians, client contacts, and company administrators each see a tailored picture without any manual filtering. The dashboard is accessible to every role in the system via the `dashboard:read` permission.
+
+## Summary stats
+
+```http
+GET /api/dashboard
+```
+
+Returns the core operational summary for the authenticated user's data scope. All data is fetched in parallel for low latency.
+
+<Tip>
+  Use the `plantId` query parameter on `/api/dashboard` to filter all metrics to a specific plant — for example, `GET /api/dashboard?plantId=plnt_xyz789`.
+</Tip>
+
+### Response shape
+
+<ResponseField name="user" type="object">
+  Basic info about the authenticated user.
+  <Expandable title="Fields">
+    <ResponseField name="nombre" type="string">
+      User's display name.
+    </ResponseField>
+    <ResponseField name="role" type="string">
+      The user's role: `ADMIN`, `SUPERVISOR`, `TECHNICIAN`, `CLIENT_RESPONSIBLE`, or `CLIENT_REQUESTER`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="tickets" type="object">
+  Ticket volume and SLA health.
+  <Expandable title="Fields">
+    <ResponseField name="open" type="number">
+      Count of tickets with status `OPEN` or `IN_PROGRESS`.
+    </ResponseField>
+    <ResponseField name="total" type="number">
+      Total tickets visible to the user, regardless of status.
+    </ResponseField>
+    <ResponseField name="slaCompliance" type="number">
+      Percentage (0–100) of resolved tickets that were closed before their `slaResolutionDeadline`. Calculated server-side using the `calculateSlaCompliance` utility, which inspects the `slaResolutionBreached` flag on each resolved ticket.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="dispensers" type="object">
+  Real-time fleet status breakdown.
+  <Expandable title="Fields">
+    <ResponseField name="total" type="number">
+      Total active dispensers in scope.
+    </ResponseField>
+    <ResponseField name="inService" type="number">
+      Dispensers with status `IN_SERVICE`.
+    </ResponseField>
+    <ResponseField name="repair" type="number">
+      Dispensers with status `UNDER_REPAIR`.
+    </ResponseField>
+    <ResponseField name="blocked" type="number">
+      Dispensers with status `BLOCKED` (awaiting OC release from a client responsible).
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="stock" type="object">
+  Low-stock alert count.
+  <Expandable title="Fields">
+    <ResponseField name="lowAlerts" type="number">
+      Count of `StockEntry` records where `minLevel > 0` and `cantidad < minLevel`. Because PostgreSQL does not support cross-column comparisons in a `WHERE` clause via Prisma, this is computed in application code after fetching all entries.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="maintenance" type="object">
+  Maintenance schedule health.
+  <Expandable title="Fields">
+    <ResponseField name="pending" type="number">
+      Maintenance schedules with status `PENDING`.
+    </ResponseField>
+    <ResponseField name="overdue" type="number">
+      Maintenance schedules with status `OVERDUE`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+**Example response:**
+
+```json
+{
+  "user": { "nombre": "Ana García", "role": "SUPERVISOR" },
+  "tickets": { "open": 4, "total": 31, "slaCompliance": 87.5 },
+  "dispensers": { "total": 48, "inService": 43, "repair": 3, "blocked": 2 },
+  "stock": { "lowAlerts": 6 },
+  "maintenance": { "pending": 12, "overdue": 3 }
+}
+```
+
+## Analytics
+
+```http
+GET /api/dashboard/analytics
+```
+
+Provides deep operational analytics combining tickets, repair history, maintenance checklists, and dispenser data. Accepts `clientId`, `plantId`, `sectorId`, and `dispenserId` as optional query filters to progressively narrow the scope.
+
+The response includes three top-level objects:
+
+<ResponseField name="kpis" type="object">
+  Aggregated time-based KPIs.
+  <Expandable title="Fields">
+    <ResponseField name="sla" type="number">
+      Average hours from ticket creation to first technician action (response to the repair or ticket resolution).
+    </ResponseField>
+    <ResponseField name="mttr" type="number">
+      **Mean Time To Repair** — average hours from ticket creation to full resolution, for all resolved tickets.
+    </ResponseField>
+    <ResponseField name="mtbf" type="number">
+      **Mean Time Between Failures** — average days between consecutive repair events for the same dispenser.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="failures" type="object">
+  Failure pattern analysis derived from maintenance checklist `fallas` arrays.
+  <Expandable title="Fields">
+    <ResponseField name="top" type="array">
+      Up to 5 most frequent failure types, each with `name`, `count`, `avgRepairTime` (hours), and `severity` (`HIGH` or `MEDIUM`).
+    </ResponseField>
+    <ResponseField name="totalReported" type="number">
+      Total distinct failure types reported across all maintenance checklists in scope.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="health" type="object">
+  Dispenser health scoring.
+  <Expandable title="Fields">
+    <ResponseField name="ranking" type="array">
+      Up to 10 worst-scoring dispensers, each with `id`, `marca`, `modelo`, `score` (0–100), and `status` (`BUENO`, `MEDIO`, or `MALO`). Sorted ascending by score (worst first).
+    </ResponseField>
+    <ResponseField name="distribution" type="object">
+      Counts of dispensers in each health band: `bueno` (score > 80), `medio` (50–80), and `malo` (< 50).
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+All data in this endpoint is scoped to the user's accessible plants via `getDataFilter`, and `CLIENT_RESPONSIBLE` users are further restricted to their own client's data.
+
+## Performance metrics
+
+```http
+GET /api/dashboard/performance
+```
+
+Delivers time-series KPI data across a rolling 6-month window, broken down by month. Accepts `clientId`, `plantId`, and an optional `failureName` filter to isolate trends caused by a specific failure type.
+
+<ResponseField name="kpis" type="object">
+  Same `sla`, `mttr`, and `mtbf` aggregates as the analytics endpoint, but computed exclusively over the filtered data set.
+</ResponseField>
+
+<ResponseField name="failures" type="array">
+  Top 10 failure types sorted by count, each with `name`, `count`, `avgRepairTime`, and `severity`.
+</ResponseField>
+
+<ResponseField name="timeline" type="array">
+  Six monthly data points (oldest to newest). Each entry has a `month` label (e.g., `"Jan 2025"`), an average `sla` in hours, and an average `mttr` in hours for that calendar month.
+</ResponseField>
+
+**Example timeline entry:**
+
+```json
+{ "month": "Apr 2025", "sla": 3.2, "mttr": 18.7 }
+```
+
+## Fleet health
+
+```http
+GET /api/dashboard/salud
+```
+
+Returns a per-dispenser health ranking and distribution for the entire accessible fleet. Filters by `clientId` or `plantId` are supported.
+
+The health score (0–100) is computed by `calculateDispenserHealth` using a weighted algorithm:
+
+| Factor | Weight | Target |
+|--------|--------|--------|
+| MTBF (months between failures) | 30% | ≥ 6 months |
+| MTTR (hours to repair) | 20% | ≤ 24 hours |
+| Maintenance condition rating | 20% | GOOD |
+| Failure recurrence (last 6 months) | 15% | ≤ 2 events |
+| Lifecycle progress consumed | 15% | Near 0% |
+
+Dispensers are classified as:
+
+<CardGroup cols={3}>
+  <Card title="ÓPTIMO" icon="circle-check">
+    Score **> 80** — healthy, low failure rate, within expected lifecycle.
+  </Card>
+  <Card title="ESTABLE" icon="circle-minus">
+    Score **50–80** — acceptable condition, monitor for deterioration.
+  </Card>
+  <Card title="CRÍTICO" icon="circle-xmark">
+    Score **< 50** — high failure rate, poor condition, or near end of lifecycle.
+  </Card>
+</CardGroup>
+
+The response includes:
+
+<ResponseField name="ranking" type="array">
+  All dispensers in scope, sorted ascending by score (most critical first). Each entry includes `id`, `marca`, `modelo`, `serial`, `planta`, `score`, `status`, and a `details` block with raw `mtbfDays`, `mttrHours`, `recurrences`, `condition`, and `progress` values.
+</ResponseField>
+
+<ResponseField name="distribution" type="object">
+  Aggregate counts: `optimo`, `estable`, and `critico`.
+</ResponseField>
+
+<ResponseField name="timeline" type="array">
+  6-month score trend for the fleet's global average health score.
+</ResponseField>
+
+## PDF reports
+
+```http
+POST /api/dashboard/pdf
+```
+
+Generates a downloadable PDF report of either operational performance or fleet health data, rendered server-side using `@react-pdf/renderer`. The response is a binary PDF stream with `Content-Type: application/pdf`.
+
+**Request body:**
+
+```json
+{
+  "type": "performance",
+  "filters": {
+    "clientId": "clnt_abc",
+    "plantId": null,
+    "failureName": null
+  },
+  "data": { ... }
+}
+```
+
+| `type` value | Report content |
+|--------------|---------------|
+| `performance` | SLA, MTTR, MTBF KPIs with metric definitions |
+| `salud` | Dispenser health distribution and top-10 ranking |
+
+The PDF includes:
+- A header with the report title and generation date, plus the active filters.
+- A metrics section showing the current KPI values.
+- For `salud` reports: a ranking table of the worst-scoring dispensers with MTBF detail.
+- A metric definitions section explaining SLA, MTTR, MTBF, and (for health reports) the scoring algorithm.
+
+<Note>
+  The PDF endpoint is a `POST` request — it expects the already-fetched analytics data in the request body so it can render the report without making additional database queries.
+</Note>
+
+## Role-based data scoping
+
+Every dashboard endpoint applies automatic data filters based on the authenticated user's role using the `getDataFilter` utility:
+
+| Role | Data scope |
+|------|-----------|
+| `ADMIN` | All clients and plants in the system. |
+| `SUPERVISOR` | All clients and plants in the system. |
+| `TECHNICIAN` | Only tickets assigned to them (`assignedToId`). |
+| `CLIENT_RESPONSIBLE` | All plants and dispensers belonging to their `clientId`. |
+| `CLIENT_REQUESTER` | Only tickets they reported, scoped to their `UserPlantAccess` plant list. |
+
+Attempting to pass a `plantId` that falls outside the user's access scope returns `403 — Acceso denegado a esta planta`.

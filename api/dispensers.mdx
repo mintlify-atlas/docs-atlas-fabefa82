@@ -1,0 +1,610 @@
+---
+title: "Dispenser API Endpoints — CRUD, Assignment, and Status"
+sidebarTitle: "Dispensers"
+description: "REST API reference for dispenser management: list, create, update, assign to location, change status, mark for repair, and initialize consumables."
+---
+
+The Dispenser API exposes every operation needed to manage the lifecycle of water dispenser units across a fleet. Dispensers move through a well-defined status machine — from `BACKUP` storage through `IN_SERVICE` deployment and back — and the routes below enforce all transition rules, lifecycle clock logic, and data-scope restrictions enforced by the caller's role.
+
+All endpoints require a valid Supabase Auth session cookie. Data-scope filtering is applied automatically: non-admin users only see dispensers whose owning plant or current location plant falls within their access set.
+
+---
+
+## GET /api/dispensers
+
+Returns a paginated list of active dispensers matching the supplied filters. Results are capped at **50 per request** and ordered by `updatedAt` descending.
+
+**Required permission:** `dispensers:read`
+
+### Query parameters
+
+<ParamField query="status" type="DispenserStatus">
+  Filter by dispenser status. Accepted values: `IN_SERVICE`, `UNDER_REPAIR`, `OUT_OF_SERVICE`, `BLOCKED`, `BACKUP`, `IN_TECHNICAL_SERVICE`, `BLOCKED_WAITING_OC`.
+</ParamField>
+
+<ParamField query="search" type="string">
+  Case-insensitive substring search across `id`, `marca`, `modelo`, and `numeroSerie`.
+</ParamField>
+
+### Response fields
+
+<ResponseField name="dispensers" type="Dispenser[]">
+  Array of dispenser objects. Each object includes the current `location` (with nested `plant` and `sector`), the owner `plant`, and a `_count.tickets` integer.
+</ResponseField>
+
+<ResponseField name="total" type="number">
+  Total number of matching dispensers (useful for pagination).
+</ResponseField>
+
+### Example
+
+```bash
+curl -X GET "https://your-domain.com/api/dispensers?status=IN_SERVICE&search=ACUA" \
+  -H "Cookie: sb-access-token=<token>"
+```
+
+```json
+{
+  "dispensers": [
+    {
+      "id": "DISP-001",
+      "marca": "Acuaservice",
+      "modelo": "Pro 600",
+      "status": "IN_SERVICE",
+      "location": {
+        "id": "loc-abc",
+        "nombre": "Comedor Planta Norte",
+        "plant": { "id": "plant-1", "nombre": "Planta Norte", "client": { "id": "cl-1", "nombre": "Empresa SA" } },
+        "sector": { "id": "sec-1", "nombre": "Producción" }
+      },
+      "plant": { "id": "plant-1", "nombre": "Planta Norte" },
+      "_count": { "tickets": 3 }
+    }
+  ],
+  "total": 1
+}
+```
+
+### Error cases
+
+| Status | Description |
+|--------|-------------|
+| `401`  | Missing or invalid authentication session. |
+| `403`  | Caller lacks the `dispensers:read` permission. |
+
+---
+
+## POST /api/dispensers
+
+Creates a new dispenser. Supports idempotency via an `Idempotency-Key` request header — submitting the same key twice returns the cached first response.
+
+**Required permission:** `dispensers:write`
+
+### Request body
+
+<ParamField body="id" type="string" required>
+  Globally unique dispenser identifier (user-defined, e.g. `"DISP-042"`). Returns `409` if already taken.
+</ParamField>
+
+<ParamField body="marca" type="string" required>
+  Brand / manufacturer name.
+</ParamField>
+
+<ParamField body="modelo" type="string" required>
+  Model name or number.
+</ParamField>
+
+<ParamField body="lifecycleMonths" type="number">
+  Expected service life in months. Defaults to `60` (5 years) if omitted.
+</ParamField>
+
+<ParamField body="numeroSerie" type="string">
+  Hardware serial number.
+</ParamField>
+
+<ParamField body="fechaCompra" type="string">
+  ISO 8601 purchase date (e.g. `"2023-06-15"`).
+</ParamField>
+
+<ParamField body="notas" type="string">
+  Free-text notes.
+</ParamField>
+
+<ParamField body="plantId" type="string">
+  ID of the owning plant. Assigns permanent ownership without deploying to a location.
+</ParamField>
+
+<ParamField body="initialConsumables" type="array">
+  Optional array of factory-installed consumables to record immediately.
+
+  <Expandable title="initialConsumables item">
+    <ParamField body="materialCode" type="string" required>
+      Catalog material code. Must exist in `MaterialCatalog`.
+    </ParamField>
+    <ParamField body="serialNumber" type="string">
+      Optional hardware serial number. When provided, it is appended to the display name as `(S/N: …)`.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Response fields
+
+<ResponseField name="id" type="string">
+  The created dispenser's ID.
+</ResponseField>
+
+<ResponseField name="status" type="string">
+  Always `BACKUP` on creation — the dispenser begins in reserve until explicitly assigned to a location.
+</ResponseField>
+
+<ResponseField name="lifecycleMonths" type="number">
+  Confirmed lifecycle duration.
+</ResponseField>
+
+<ResponseField name="createdAt" type="string">
+  ISO 8601 creation timestamp.
+</ResponseField>
+
+### Example
+
+```bash
+curl -X POST "https://your-domain.com/api/dispensers" \
+  -H "Cookie: sb-access-token=<token>" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: create-disp-042-20240101" \
+  -d '{
+    "id": "DISP-042",
+    "marca": "Acuaservice",
+    "modelo": "Pro 600",
+    "lifecycleMonths": 60,
+    "numeroSerie": "SN-98765",
+    "fechaCompra": "2024-01-15",
+    "plantId": "plant-abc",
+    "initialConsumables": [
+      { "materialCode": "FILT-001", "serialNumber": "F-123" }
+    ]
+  }'
+```
+
+```json
+{
+  "id": "DISP-042",
+  "marca": "Acuaservice",
+  "modelo": "Pro 600",
+  "status": "BACKUP",
+  "lifecycleMonths": 60,
+  "numeroSerie": "SN-98765",
+  "fechaCompra": "2024-01-15T00:00:00.000Z",
+  "plantId": "plant-abc",
+  "active": true,
+  "createdAt": "2024-01-15T10:30:00.000Z",
+  "updatedAt": "2024-01-15T10:30:00.000Z"
+}
+```
+
+### Error cases
+
+| Status | Description |
+|--------|-------------|
+| `400`  | `id`, `marca`, or `modelo` is missing or blank. |
+| `401`  | Missing or invalid authentication session. |
+| `403`  | Caller lacks the `dispensers:write` permission. |
+| `409`  | A dispenser with the given `id` already exists. |
+
+---
+
+## GET /api/dispensers/\{id\}
+
+Retrieves a single dispenser with full relational detail, including location history, repair history, consumable history, spare-part history, the last 12 maintenance schedules, and the 10 most recent tickets.
+
+Also returns two computed fields: `lifecycleExpiration` (the projected end-of-life date, adjusted for accumulated pause time) and `lifecycleRemainingDays`.
+
+**Required permission:** `dispensers:read`
+
+### Response fields
+
+<ResponseField name="id" type="string">
+  Dispenser identifier.
+</ResponseField>
+
+<ResponseField name="marca" type="string">
+  Brand name.
+</ResponseField>
+
+<ResponseField name="modelo" type="string">
+  Model name.
+</ResponseField>
+
+<ResponseField name="status" type="DispenserStatus">
+  Current operational status.
+</ResponseField>
+
+<ResponseField name="location" type="object">
+  Current location object including nested `plant` (with `client`) and `sector`.
+</ResponseField>
+
+<ResponseField name="plant" type="object">
+  Owner plant (`id`, `nombre`, `clientId`).
+</ResponseField>
+
+<ResponseField name="locationHistory" type="DispenserLocationHistory[]">
+  Up to 20 most recent location assignments, each with `location.plant.nombre` and `assignedBy.nombre`.
+</ResponseField>
+
+<ResponseField name="repairHistory" type="DispenserRepairHistory[]">
+  Up to 20 most recent repair records with `technician.nombre`.
+</ResponseField>
+
+<ResponseField name="consumableHistory" type="DispenserConsumableHistory[]">
+  Full consumable installation history, ordered newest-first.
+</ResponseField>
+
+<ResponseField name="sparePartHistory" type="DispenserSparePartHistory[]">
+  Up to 20 spare-part replacement records.
+</ResponseField>
+
+<ResponseField name="maintenanceSchedules" type="MaintenanceSchedule[]">
+  Up to 12 most recent maintenance schedules with their checklists.
+</ResponseField>
+
+<ResponseField name="tickets" type="object[]">
+  Up to 10 most recent tickets (`id`, `reason`, `priority`, `status`, `createdAt`).
+</ResponseField>
+
+<ResponseField name="_count" type="object">
+  `{ tickets: number, repairHistory: number }` — total counts for the full dataset.
+</ResponseField>
+
+<ResponseField name="lifecycleExpiration" type="string | null">
+  ISO 8601 projected expiration date, accounting for all accumulated pause time. `null` if the lifecycle has not started.
+</ResponseField>
+
+<ResponseField name="lifecycleRemainingDays" type="number | null">
+  Days remaining until lifecycle expiration, clamped to `0`. `null` if the lifecycle has not started.
+</ResponseField>
+
+### Example
+
+```bash
+curl -X GET "https://your-domain.com/api/dispensers/DISP-042" \
+  -H "Cookie: sb-access-token=<token>"
+```
+
+### Error cases
+
+| Status | Description |
+|--------|-------------|
+| `401`  | Missing or invalid authentication session. |
+| `403`  | Caller lacks `dispensers:read` or the dispenser is outside their data scope. |
+| `404`  | No dispenser found with the given ID. |
+
+---
+
+## PATCH /api/dispensers/\{id\}
+
+Updates editable metadata fields on an existing dispenser. Only provided fields are changed; all others are left untouched. An `ADMIN` user may additionally set `lifecycleStartDate` if it has not been set yet.
+
+**Required permission:** `dispensers:write`
+
+<Note>
+  This endpoint also accepts `PUT`. `PATCH` and `PUT` are equivalent.
+</Note>
+
+### Request body
+
+<ParamField body="marca" type="string">
+  New brand name.
+</ParamField>
+
+<ParamField body="modelo" type="string">
+  New model name.
+</ParamField>
+
+<ParamField body="lifecycleMonths" type="number">
+  Updated service-life duration in months.
+</ParamField>
+
+<ParamField body="numeroSerie" type="string">
+  New serial number. Pass `null` to clear.
+</ParamField>
+
+<ParamField body="fechaCompra" type="string">
+  ISO 8601 purchase date. Pass `null` to clear.
+</ParamField>
+
+<ParamField body="notas" type="string">
+  Free-text notes. Pass `null` to clear.
+</ParamField>
+
+<ParamField body="plantId" type="string">
+  Transfer ownership to a different plant. Pass `null` to clear ownership.
+</ParamField>
+
+### Example
+
+```bash
+curl -X PATCH "https://your-domain.com/api/dispensers/DISP-042" \
+  -H "Cookie: sb-access-token=<token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "modelo": "Pro 700",
+    "notas": "Upgraded filter housing in Jan 2024"
+  }'
+```
+
+```json
+{
+  "id": "DISP-042",
+  "marca": "Acuaservice",
+  "modelo": "Pro 700",
+  "notas": "Upgraded filter housing in Jan 2024",
+  "updatedAt": "2024-06-01T14:22:00.000Z"
+}
+```
+
+### Error cases
+
+| Status | Description |
+|--------|-------------|
+| `401`  | Missing or invalid authentication session. |
+| `403`  | Caller lacks `dispensers:write`. |
+| `404`  | Dispenser not found. |
+
+---
+
+## POST /api/dispensers/\{id\}/assign
+
+Assigns a dispenser to a physical location. Enforces the **one active dispenser per location** rule. Records a new `DispenserLocationHistory` entry and starts the lifecycle clock on first assignment. When the dispenser is coming from `BACKUP` status, any accumulated pause time is recorded and the clock resumes.
+
+**Required permission:** `dispensers:assign`
+
+### Request body
+
+<ParamField body="locationId" type="string" required>
+  ID of the target location. Must exist and be active.
+</ParamField>
+
+<ParamField body="force" type="boolean">
+  Set to `true` to override the conflict when the dispenser is already assigned elsewhere. The previous assignment is closed automatically.
+</ParamField>
+
+### Response fields
+
+<ResponseField name="id" type="string">
+  Dispenser ID.
+</ResponseField>
+
+<ResponseField name="locationId" type="string">
+  The newly assigned location ID.
+</ResponseField>
+
+<ResponseField name="status" type="string">
+  Always `IN_SERVICE` after a successful assignment.
+</ResponseField>
+
+<ResponseField name="lifecycleStartDate" type="string | null">
+  Set on first assignment; unchanged for subsequent reassignments.
+</ResponseField>
+
+### Example
+
+```bash
+curl -X POST "https://your-domain.com/api/dispensers/DISP-042/assign" \
+  -H "Cookie: sb-access-token=<token>" \
+  -H "Content-Type: application/json" \
+  -d '{ "locationId": "loc-xyz" }'
+```
+
+```json
+{
+  "id": "DISP-042",
+  "locationId": "loc-xyz",
+  "status": "IN_SERVICE",
+  "lifecycleStartDate": "2024-01-15T10:30:00.000Z",
+  "lifecyclePausedAt": null,
+  "updatedAt": "2024-06-01T08:00:00.000Z"
+}
+```
+
+### Error cases
+
+| Status | Description |
+|--------|-------------|
+| `400`  | `locationId` is missing. |
+| `401`  | Missing or invalid authentication session. |
+| `403`  | Caller lacks `dispensers:assign`. |
+| `404`  | Dispenser or location not found. |
+| `409`  | The location already has an active `IN_SERVICE` dispenser, or the dispenser is already assigned elsewhere and `force` was not set. |
+
+---
+
+## PATCH /api/dispensers/\{id\}/status
+
+Changes the operational status of a dispenser. Validates the transition and applies side effects:
+
+- **→ `BACKUP`**: lifecycle clock is **paused** (`lifecyclePausedAt` is set) and the dispenser is removed from its current location.
+- **→ `UNDER_REPAIR`**: dispenser is removed from its current location.
+- **→ `BLOCKED`**: `reason` is required; email notifications are sent to `CLIENT_RESPONSIBLE` and `CLIENT_REQUESTER` users mapped to the affected plant.
+- **`BLOCKED` → `IN_SERVICE`**: requires the additional `dispensers:release_block` permission.
+
+<Note>
+  This endpoint also accepts `PUT`. `PATCH` and `PUT` are equivalent.
+</Note>
+
+**Required permission:** `dispensers:status` (plus `dispensers:release_block` when unblocking)
+
+### Request body
+
+<ParamField body="status" type="DispenserStatus" required>
+  Target status. Accepted values: `IN_SERVICE`, `UNDER_REPAIR`, `OUT_OF_SERVICE`, `BLOCKED`, `BACKUP`, `IN_TECHNICAL_SERVICE`, `BLOCKED_WAITING_OC`.
+</ParamField>
+
+<ParamField body="reason" type="string">
+  Human-readable reason for the change. **Required** when `status` is `BLOCKED`.
+</ParamField>
+
+### Response fields
+
+<ResponseField name="id" type="string">
+  Dispenser ID.
+</ResponseField>
+
+<ResponseField name="status" type="DispenserStatus">
+  New status.
+</ResponseField>
+
+<ResponseField name="blockedReason" type="string | null">
+  Populated when status is `BLOCKED`; cleared on release.
+</ResponseField>
+
+<ResponseField name="blockedAt" type="string | null">
+  ISO 8601 timestamp of the block event.
+</ResponseField>
+
+<ResponseField name="lifecyclePausedAt" type="string | null">
+  Set when status transitions to `BACKUP`.
+</ResponseField>
+
+### Example
+
+```bash
+curl -X PATCH "https://your-domain.com/api/dispensers/DISP-042/status" \
+  -H "Cookie: sb-access-token=<token>" \
+  -H "Content-Type: application/json" \
+  -d '{ "status": "BLOCKED", "reason": "Pending OC renewal from client" }'
+```
+
+```json
+{
+  "id": "DISP-042",
+  "status": "BLOCKED",
+  "blockedReason": "Pending OC renewal from client",
+  "blockedAt": "2024-06-01T09:15:00.000Z",
+  "updatedAt": "2024-06-01T09:15:00.000Z"
+}
+```
+
+### Error cases
+
+| Status | Description |
+|--------|-------------|
+| `400`  | `status` is missing, invalid, or `BLOCKED` was requested without a `reason`. |
+| `401`  | Missing or invalid authentication session. |
+| `403`  | Caller lacks `dispensers:status`, or attempting to release a `BLOCKED` dispenser without `dispensers:release_block`. |
+| `404`  | Dispenser not found. |
+
+---
+
+## POST /api/dispensers/\{id\}/set-repair
+
+A convenience endpoint that transitions a dispenser directly to `UNDER_REPAIR` status, removes it from its current location, and writes an audit log entry — all in a single atomic transaction. Use this when a quick repair flag is needed without going through the full status endpoint.
+
+**Required permission:** `dispensers:write`
+
+<Tip>
+  To record a detailed repair with diagnostics, use `POST /api/tickets/{id}/repair` which also creates a `DispenserRepairHistory` entry and links it to the originating ticket.
+</Tip>
+
+### Request body
+
+This endpoint does not accept a request body.
+
+### Response fields
+
+<ResponseField name="success" type="boolean">
+  `true` when the update was applied.
+</ResponseField>
+
+### Example
+
+```bash
+curl -X POST "https://your-domain.com/api/dispensers/DISP-042/set-repair" \
+  -H "Cookie: sb-access-token=<token>"
+```
+
+```json
+{ "success": true }
+```
+
+### Error cases
+
+| Status | Description |
+|--------|-------------|
+| `401`  | Missing or invalid authentication session. |
+| `403`  | Caller lacks `dispensers:write`. |
+| `404`  | Dispenser not found. |
+
+---
+
+## POST /api/dispensers/\{id\}/consumables/init
+
+Initializes or replaces the consumables currently installed in a dispenser. Each item is processed against the plant's live inventory: serialized consumables are marked inactive in stock; bulk consumables decrement the aggregate stock count. New items (flagged `isNew: true`) can also be registered in the catalog and inventory in the same call.
+
+If the dispenser has no owning plant (`plantId` is null), inventory interactions are skipped and the history records are still written.
+
+**Required permission:** `dispensers:write`
+
+### Request body
+
+<ParamField body="items" type="array" required>
+  Non-empty array of consumable entries to install.
+
+  <Expandable title="items entry">
+    <ParamField body="materialCode" type="string" required>
+      Catalog material code.
+    </ParamField>
+    <ParamField body="isNew" type="boolean">
+      Set to `true` if this material does not yet exist in inventory and should be created on the fly.
+    </ParamField>
+    <ParamField body="nombre" type="string">
+      Display name — required when `isNew` is `true`.
+    </ParamField>
+    <ParamField body="uniqueId" type="string">
+      Serial / unique tracking ID for serialized consumables.
+    </ParamField>
+    <ParamField body="cantidad" type="number">
+      Quantity for bulk (non-serialized) consumables. Defaults to `1`.
+    </ParamField>
+    <ParamField body="expirationMonths" type="number">
+      Override expiration duration in months. Only used when `isNew` is `true`.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Response fields
+
+<ResponseField name="success" type="boolean">
+  `true` when all items were processed and history records created.
+</ResponseField>
+
+### Example
+
+```bash
+curl -X POST "https://your-domain.com/api/dispensers/DISP-042/consumables/init" \
+  -H "Cookie: sb-access-token=<token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "items": [
+      { "materialCode": "FILT-001", "uniqueId": "F-ABC-999", "isNew": false },
+      { "materialCode": "CARB-002", "cantidad": 2, "isNew": false }
+    ]
+  }'
+```
+
+```json
+{ "success": true }
+```
+
+<Warning>
+  If the dispenser's plant has insufficient stock for any bulk item, or a serialized `uniqueId` is already consumed or does not exist, the entire transaction is rolled back and a descriptive `error` message is returned with status `500`.
+</Warning>
+
+### Error cases
+
+| Status | Description |
+|--------|-------------|
+| `400`  | `items` array is missing or empty. |
+| `401`  | Missing or invalid authentication session. |
+| `403`  | Caller lacks `dispensers:write`. |
+| `404`  | Dispenser not found. |
+| `500`  | Insufficient stock, unknown material code, or duplicate serial number — the error message describes the specific failure. |

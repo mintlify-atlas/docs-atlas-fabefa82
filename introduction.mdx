@@ -1,0 +1,79 @@
+---
+title: "HDB Service: Dispenser Fleet Management Platform"
+sidebarTitle: "Introduction"
+description: "HDB Service manages water dispenser fleets end-to-end — from ticketing and maintenance scheduling to inventory control, SLA enforcement, and multi-role access across clients and plants."
+---
+
+HDB Service is a full-stack field service management platform designed for companies that operate, maintain, and support fleets of water dispensers across multiple client sites. It replaces fragmented spreadsheets and manual workflows with a single, structured system that covers the entire dispenser lifecycle — from initial installation and routine preventive maintenance, through incident ticketing and SLA tracking, all the way to consumable inventory and inter-plant stock transfers. Whether you're a service provider managing dozens of enterprise clients or an internal facilities team overseeing a single campus, HDB Service gives every stakeholder a clear, role-appropriate view of what's happening in the field.
+
+## What is HDB Service?
+
+HDB Service is built around the reality that water dispenser operations span a multi-level business hierarchy. At the top is a **Client** — an organisation that owns or leases a fleet of dispensers. Each client can have one or more **Plants** (physical premises), and each plant is subdivided into **Sectors** (functional zones such as production floors or office areas). Within a sector you define **Locations** — the exact spots where a dispenser is physically installed — and at the leaf of this tree sits the **Dispenser** itself, a trackable unit with its own status, lifecycle, serial number, and full history.
+
+```
+Client
+└── Plant
+    └── Sector
+        └── Location
+            └── Dispenser
+```
+
+Access to the platform is gated by five distinct roles, each with a precisely scoped permission set:
+
+| Role | Description |
+|---|---|
+| `ADMIN` | Full platform access — clients, users, SLA config, audit logs, and all operations. |
+| `SUPERVISOR` | Broad operational access comparable to ADMIN, excluding dispenser block-release and SLA config. |
+| `TECHNICIAN` | Field-facing role: reads dispensers and locations, creates and resolves tickets, performs maintenance, and updates stock. |
+| `CLIENT_RESPONSIBLE` | Client-side manager: reads their own hierarchy, raises and follows tickets, approves blocked dispensers, and generates reports. |
+| `CLIENT_REQUESTER` | End-user role: submits tickets for dispensers in their assigned plants and tracks progress. |
+
+## Key capabilities
+
+<CardGroup cols={2}>
+  <Card title="Dispenser Lifecycle" icon="glass-water" href="/features/dispensers">
+    Track every dispenser through statuses — `IN_SERVICE`, `UNDER_REPAIR`, `BACKUP`, `BLOCKED`, `OUT_OF_SERVICE`, and more — with a full history of location moves, repairs, consumable installs, and spare part replacements.
+  </Card>
+  <Card title="Ticketing & SLA" icon="ticket" href="/features/tickets">
+    Create and route service tickets with four priority levels (LOW → CRITICAL). Per-client SLA configurations automatically compute response and resolution deadlines, trigger near-breach alerts, and record breaches for reporting.
+  </Card>
+  <Card title="Preventive Maintenance" icon="wrench" href="/features/maintenance">
+    Schedule monthly maintenance visits per dispenser. Technicians complete structured checklists, record observations and photos, and collect digital signatures (SHA-512 + AES-256-GCM) as legally binding proof of service.
+  </Card>
+  <Card title="Inventory Management" icon="package" href="/features/inventory">
+    Manage consumables and spare parts per plant with min/max stock levels. Transfer items between plants, track inter-plant debts, and receive low-stock alerts before field operations are disrupted.
+  </Card>
+  <Card title="Analytics Dashboard" icon="chart-bar" href="/features/dashboard">
+    Built-in ECharts dashboards surface operational KPIs: ticket volumes by status and priority, SLA compliance rates, MTTR, maintenance completion rates, and dispenser health distribution.
+  </Card>
+  <Card title="PWA & QR Scanning" icon="qrcode" href="/features/notifications">
+    HDB Service ships as a Progressive Web App — installable on any mobile device, with offline-capable API caching via Workbox. Technicians can scan dispenser QR codes to instantly open tickets or view the dispenser record without typing an ID.
+  </Card>
+</CardGroup>
+
+## Technology stack
+
+- **Next.js 16** — App Router, React Server Components, API routes under `/app/api/`
+- **Prisma ORM** (v5) — type-safe database access with migration-based schema management
+- **PostgreSQL** — hosted on Supabase for managed infrastructure and connection pooling via PgBouncer
+- **Supabase Auth** — SSR cookie-based sessions with `@supabase/ssr`
+- **OneSignal** — push notifications for ticket assignments, SLA breaches, maintenance reminders, and low-stock alerts
+- **TailwindCSS** — utility-first styling with `tailwind-merge` and `tailwindcss-animate`
+- **React Query** (`@tanstack/react-query` v5) — server-state management and background refetching
+- **Zustand** — lightweight client-side state store
+- **PWA** (`@ducanh2912/next-pwa`) — service worker with NetworkFirst API caching and StaleWhileRevalidate for static assets
+- **ECharts** — interactive analytics charts via `echarts-for-react`
+
+## Architecture overview
+
+All backend logic is exposed through Next.js API routes located under `/app/api/`. Routes are organised by domain — for example, `/app/api/tickets/`, `/app/api/dispensers/`, `/app/api/maintenance/`, and `/app/api/cron/` for scheduled background jobs.
+
+Authentication is handled entirely by Supabase using SSR-compatible cookies (`@supabase/ssr`). Every protected API route calls `requirePermission()` from `lib/auth.ts`, which validates the active session and checks the caller's role against the RBAC permission matrix defined in `lib/rbac.ts`. If the user lacks the required permission, the route returns `403 Forbidden` before any database query runs.
+
+The permission system uses fine-grained action strings such as `dispensers:release_block`, `tickets:assign`, and `sla_config:write`, making it straightforward to add new operations without restructuring role definitions. The full matrix is defined in `lib/rbac.ts` and maps each of the five roles to its allowed set of permissions.
+
+An `AuditLog` table records every mutating action (CREATE, UPDATE, DELETE, ASSIGN, STATUS_CHANGE, TRANSFER, BLOCK, RELEASE) with the acting user, affected entity, before/after values, IP address, and timestamp — giving administrators a tamper-evident trail of every operation in the system.
+
+<Note>
+  Ready to get the platform running locally? Follow the [Quickstart](/quickstart) guide to clone the repo, configure your environment, and launch HDB Service in under 10 minutes.
+</Note>

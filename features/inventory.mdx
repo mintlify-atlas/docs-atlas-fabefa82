@@ -1,0 +1,272 @@
+---
+title: "Inventory Management: Stock, Transfers, and Debts"
+sidebarTitle: "Inventory"
+description: "Manage consumables and spare parts per plant, track serial numbers, transfer stock between plants, and resolve inter-plant debt records automatically."
+---
+
+HDB Service includes a full inventory management layer that tracks consumables and spare parts across every plant in your fleet. Each stock entry is anchored to a standardized material catalog, ensuring consistent naming and item metadata regardless of which plant holds the stock. The system enforces minimum and maximum levels, flags low-stock conditions automatically, supports serialized item tracking, facilitates inter-plant transfers, and records lending activity as formal debt records that can be resolved with a matching transfer.
+
+## Material catalog
+
+The `MaterialCatalog` model defines every item that can exist in inventory. Catalog entries act as the source of truth for item metadata and are referenced by all stock entries, consumable records, and repair histories.
+
+<ResponseField name="code" type="string" required>
+  Unique internal code used as the primary lookup key across all inventory operations. All `StockEntry` and `Consumable` records reference this field.
+</ResponseField>
+
+<ResponseField name="nombre" type="string" required>
+  Human-readable item name. Automatically copied to stock entries and consumable records at creation time.
+</ResponseField>
+
+<ResponseField name="type" type="string" required>
+  Item classification: `CONSUMABLE` or `SPARE_PART`. Determines the `itemType` set on the corresponding `StockEntry`.
+</ResponseField>
+
+<ResponseField name="expirationMonths" type="number">
+  Optional shelf life expressed in months. When a consumable is installed on a dispenser, the system calculates `expiresAt` as `installedAt + expirationMonths`.
+</ResponseField>
+
+<ResponseField name="requiresSerial" type="boolean">
+  When `true`, every unit added to inventory must have a unique serial number (`uniqueId`). See [Serialized consumables](#serialized-consumables) below.
+</ResponseField>
+
+<ResponseField name="clientId" type="string">
+  Optional — when set, the catalog entry is private to a specific client. When `null`, the entry is globally available across all clients.
+</ResponseField>
+
+Catalog entries are validated on every `POST /api/stock` request. Attempting to add stock for an unregistered `materialCode` returns a `400` error, preventing ad-hoc item creation that would break standardization.
+
+## Stock entries
+
+The `StockEntry` model is the per-plant inventory record. Each entry is uniquely identified by the composite key `(plantId, itemType, materialCode)`, so there is at most one stock entry per item per plant.
+
+<ResponseField name="plantId / clientId" type="string" required>
+  Links the entry to a specific plant and its parent client.
+</ResponseField>
+
+<ResponseField name="itemType" type="StockItemType" required>
+  Mirrors the catalog `type` field: `CONSUMABLE` or `SPARE_PART`.
+</ResponseField>
+
+<ResponseField name="materialCode" type="string" required>
+  References the corresponding `MaterialCatalog` entry.
+</ResponseField>
+
+<ResponseField name="cantidad" type="float">
+  Current quantity on hand.
+</ResponseField>
+
+<ResponseField name="minLevel" type="float">
+  Minimum acceptable quantity. When `cantidad < minLevel` (and `minLevel > 0`), the entry is counted as a low-stock alert in the dashboard and triggers a `STOCK_LOW` notification.
+</ResponseField>
+
+<ResponseField name="maxLevel" type="float">
+  Target or maximum stocking quantity. Useful for determining reorder amounts.
+</ResponseField>
+
+<ResponseField name="unidad" type="string">
+  Unit of measure (e.g., `"unidad"`, `"litro"`, `"kg"`). Defaults to `"unidad"`.
+</ResponseField>
+
+### Querying stock
+
+```http
+GET /api/stock
+```
+
+Supports query parameters:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `plantId` | string | Filter to a single plant. |
+| `itemType` | string | Filter to `CONSUMABLE` or `SPARE_PART`. |
+| `lowStockOnly` | boolean | When `true`, returns only entries where `cantidad < minLevel`. |
+
+The response is an array of enriched `StockEntry` objects. Serialized items include a `serialNumbers` array (see below).
+
+### Creating or updating stock
+
+```http
+POST /api/stock
+```
+
+```json
+{
+  "clientId": "clnt_abc123",
+  "plantId": "plnt_xyz789",
+  "materialCode": "FILT-5M",
+  "cantidad": 10,
+  "minLevel": 3,
+  "maxLevel": 20,
+  "unidad": "unidad"
+}
+```
+
+The endpoint performs an **upsert** keyed on `(plantId, itemType, materialCode)`:
+- If no entry exists, it is created with the provided quantity.
+- If an entry already exists, `cantidad` is **incremented** by the given amount — this prevents accidentally overwriting existing stock with a lower number.
+
+<Warning>
+  Every `POST /api/stock` request validates `materialCode` against the `MaterialCatalog`. If the code is not found, the request is rejected with `400 — Código de material no encontrado en el catálogo estandarizado.`
+</Warning>
+
+## Serialized consumables
+
+When a `MaterialCatalog` entry has `requiresSerial: true`, each physical unit must be tracked individually by a unique serial number (`uniqueId`).
+
+Adding a serialized item to inventory follows this flow:
+
+<Steps>
+  <Step title="Include the serial number">
+    Pass the unit's serial number as `uniqueId` in the `POST /api/stock` body.
+  </Step>
+  <Step title="System creates a Consumable record">
+    The API first checks that the `uniqueId` is not already registered. If it is unique, it creates a `Consumable` record with the `uniqueId`, `materialCode`, `nombre`, `plantId`, and `expirationMonths` from the catalog.
+  </Step>
+  <Step title="Stock quantity incremented by 1">
+    Regardless of the `cantidad` field in the request body, serialized items always increment `StockEntry.cantidad` by exactly `1` per call.
+  </Step>
+</Steps>
+
+The `GET /api/stock` response attaches a `serialNumbers` array to every serialized entry, listing all active `uniqueId` values registered for that `(plantId, materialCode)` combination:
+
+```json
+{
+  "id": "se_abc",
+  "materialCode": "MEM-200",
+  "nombre": "Membrana 200GPD",
+  "cantidad": 3,
+  "minLevel": 1,
+  "serialNumbers": ["SN-001", "SN-002", "SN-003"]
+}
+```
+
+<Note>
+  If `requiresSerial` is `true` but no `uniqueId` is provided in the request, the API returns `400 — Este material requiere un número de serie.`
+</Note>
+
+## Adjusting stock
+
+For manual inventory corrections — such as reconciling a physical count against the system — use the stock adjustment endpoint.
+
+```http
+POST /api/stock/{id}/adjust
+```
+
+```json
+{
+  "action": "ADJUST_QTY",
+  "newCantidad": 7,
+  "justificacion": "Physical count confirmed 7 units on shelf."
+}
+```
+
+The `action` field accepts two values:
+
+| Action | Effect |
+|--------|--------|
+| `ADJUST_QTY` | Sets `cantidad` to an absolute value (`newCantidad`). |
+| `DELETE` | Removes the stock entry and soft-deletes all associated `Consumable` records (`active: false`). |
+
+A `justificacion` (justification) string is **required** for both actions. Every adjustment is written to the `AuditLog` and triggers a push notification to ADMIN and SUPERVISOR users via OneSignal, with a message that includes the before/after quantity and the provided justification.
+
+<Warning>
+  Adjustments are irreversible direct writes to the database — they do not increment or decrement, they replace. Double-check `newCantidad` before submitting.
+</Warning>
+
+## Inter-plant transfers
+
+`StockTransfer` records move material from one plant (`fromPlantId`) to another (`toPlantId`). Both plants must belong to the same client.
+
+```http
+POST /api/stock/transfer
+```
+
+```json
+{
+  "fromPlantId": "plnt_north",
+  "toPlantId": "plnt_south",
+  "itemType": "CONSUMABLE",
+  "materialCode": "FILT-5M",
+  "nombre": "Filtro 5 Micrones",
+  "cantidad": 5
+}
+```
+
+The transfer is executed inside a **database transaction** that:
+
+<Steps>
+  <Step title="Validates source stock">
+    Confirms that `fromPlant` has enough `cantidad` to cover the requested transfer. Returns `400` if insufficient.
+  </Step>
+  <Step title="Decrements source stock">
+    Reduces `StockEntry.cantidad` at `fromPlantId` by `cantidad`.
+  </Step>
+  <Step title="Increments destination stock">
+    Upserts the `StockEntry` at `toPlantId`, creating it if it does not yet exist.
+  </Step>
+  <Step title="Creates a StockTransfer record">
+    Persists the transfer with `status: COMPLETED` and `completedAt` timestamp.
+  </Step>
+  <Step title="Auto-resolves pending debts">
+    If `fromPlant` has any `PENDING` `InterPlantDebt` records owed to `toPlant` for the same `materialCode`, the system automatically resolves them in FIFO order. Partial debt resolution splits the debt record.
+  </Step>
+</Steps>
+
+<ResponseField name="status" type="TransferStatus">
+  Transfer lifecycle: `PENDING → COMPLETED`. Currently, all transfers created via the API are immediately marked `COMPLETED`.
+</ResponseField>
+
+To list transfers for a plant:
+
+```http
+GET /api/stock/transfer?plantId={plantId}
+```
+
+## Inter-plant debts
+
+`InterPlantDebt` records formalize situations where one plant lends a consumable to another plant — for example, a technician borrows a filter from a nearby plant to resolve an urgent ticket.
+
+<ResponseField name="creditorPlantId" type="string">
+  The plant that lent the material (the one owed a return).
+</ResponseField>
+
+<ResponseField name="debtorPlantId" type="string">
+  The plant that received the material (the one that owes the return).
+</ResponseField>
+
+<ResponseField name="materialCode" type="string">
+  The material that was lent.
+</ResponseField>
+
+<ResponseField name="cantidad" type="float">
+  Quantity lent.
+</ResponseField>
+
+<ResponseField name="status" type="DebtStatus">
+  `PENDING` until the debtor plant transfers equivalent stock back to the creditor, at which point it becomes `RESOLVED`.
+</ResponseField>
+
+<ResponseField name="resolvedAt" type="datetime">
+  Timestamp set when the debt is resolved, either manually or automatically by the transfer pipeline.
+</ResponseField>
+
+To query debts for a plant (defaults to `status=PENDING`):
+
+```http
+GET /api/stock/debts?plantId={plantId}&status=PENDING
+```
+
+**Automatic resolution:** When a `StockTransfer` is posted from plant A to plant B, the system checks whether plant A has any outstanding `InterPlantDebt` records where plant B is the creditor for the same material. Debts are resolved FIFO using the transferred quantity. If the transfer only partially covers a debt, the debt record is split: the resolved portion is marked `RESOLVED` and the remainder stays `PENDING`.
+
+## Required permissions
+
+| Permission | Roles |
+|-----------|-------|
+| `stock:read` | ADMIN, SUPERVISOR, TECHNICIAN, CLIENT_RESPONSIBLE, CLIENT_REQUESTER |
+| `stock:write` | ADMIN, SUPERVISOR, TECHNICIAN |
+| `stock:transfer` | ADMIN, SUPERVISOR |
+
+<Note>
+  `CLIENT_REQUESTER` users can read stock but their view is scoped to the plants listed in their `UserPlantAccess` records. `CLIENT_RESPONSIBLE` users see all plants belonging to their client.
+</Note>

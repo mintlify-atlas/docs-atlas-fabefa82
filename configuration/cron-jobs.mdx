@@ -1,0 +1,142 @@
+---
+title: "Automated Cron Jobs: SLA Checks and Maintenance Scheduling"
+sidebarTitle: "Cron Jobs"
+description: "HDB Service runs three automated tasks daily — SLA breach detection, maintenance schedule generation, and monthly closure — all triggered by a single Vercel Cron endpoint."
+---
+
+HDB Service uses a single consolidated cron endpoint — `/api/cron` — to run all scheduled background work. Rather than maintaining multiple independent cron routes, the endpoint executes three tasks sequentially every day: it closes stale maintenance schedules from prior months, generates fresh schedules for active dispensers, and checks every open ticket for SLA breaches and near-breach conditions. Each task is wrapped in its own `try/catch` so that a failure in one does not block the others.
+
+---
+
+## Vercel Cron Configuration
+
+The cron schedule is declared in `vercel.json` at the repository root:
+
+```json
+{
+  "crons": [
+    {
+      "path": "/api/cron",
+      "schedule": "0 2 * * *"
+    }
+  ]
+}
+```
+
+Vercel calls `GET /api/cron` automatically every day at **2:00 AM UTC**. Before executing any task, the endpoint validates the incoming `Authorization` header:
+
+```typescript
+const authHeader = req.headers.get('authorization');
+if (process.env.CRON_SECRET && authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+  return new NextResponse('Unauthorized', { status: 401 });
+}
+```
+
+Any request that does not supply `Authorization: Bearer <CRON_SECRET>` receives a `401 Unauthorized` response and no tasks are executed. See [Environment Variables](/configuration/environment) for details on setting `CRON_SECRET`.
+
+---
+
+## Task A: Monthly Closure
+
+The first task to run marks stale maintenance schedules as `EXPIRED`.
+
+Any `MaintenanceSchedule` record whose `scheduledMonth` value is earlier than the current calendar month (using `YYYY-MM` string comparison) and whose `status` is still `PENDING` or `OVERDUE` is bulk-updated to `EXPIRED`. This prevents old unresolved schedules from polluting active reporting and dashboards.
+
+The task returns `expiredCount` — the number of records updated.
+
+```typescript
+const expiredSchedules = await prisma.maintenanceSchedule.updateMany({
+  where: {
+    scheduledMonth: { lt: currentMonth },
+    status: { in: ['PENDING', 'OVERDUE'] }
+  },
+  data: { status: 'EXPIRED' }
+});
+// → results.monthlyClosure = { success: true, expiredCount: expiredSchedules.count }
+```
+
+---
+
+## Task B: Maintenance Schedule Generation
+
+The second task keeps the maintenance schedule table current for all active dispensers.
+
+It operates in two steps:
+
+1. **Mark overdue schedules** — any `PENDING` schedule whose `scheduledMonth` is earlier than the current month is transitioned to `OVERDUE`. This catches dispensers that were missed before the monthly closure window.
+
+2. **Upsert schedules for this month** — the task fetches every `Dispenser` that is both `IN_SERVICE` and `active: true`, then calls `upsert` on `MaintenanceSchedule` using the composite unique key `(dispenserId, scheduledMonth)`. If a schedule for the current month already exists it is left unchanged; otherwise a new `PENDING` schedule is created.
+
+The task returns three counters:
+
+| Field | Meaning |
+|---|---|
+| `overdueCount` | Schedules transitioned to `OVERDUE` |
+| `processedCount` | Total active `IN_SERVICE` dispensers evaluated |
+| `createdCount` | New `PENDING` schedules inserted this run |
+
+---
+
+## Task C: SLA Breach and Near-Breach Checking
+
+The third task audits every open ticket for SLA compliance and dispatches notifications when deadlines are breached or approaching.
+
+The logic runs as follows:
+
+1. **Fetch active tickets** — all tickets with `status` `OPEN` or `IN_PROGRESS` are loaded, including their client's `SlaConfig` (which holds per-priority deadline minutes and the `nearBreachPercent` threshold).
+
+2. **Deduplicate near-breach notifications** — before iterating, existing `Notification` records of type `SLA_NEAR_BREACH` are loaded for all active ticket IDs. This set is used to avoid sending duplicate near-breach alerts for the same ticket across multiple cron runs.
+
+3. **Per-ticket evaluation** — for each ticket:
+   - If `status` is `OPEN` and `slaResponseDeadline` has passed (and `slaResponseBreached` is not yet set), `slaResponseBreached` is flagged for update.
+   - If `slaResolutionDeadline` has passed (and `slaResolutionBreached` is not yet set), `slaResolutionBreached` is flagged and an `SLA_BREACHED` notification is queued.
+   - If the resolution deadline has **not** passed but `getSlaStatus()` returns `NEAR_BREACH` and no prior near-breach notification exists for that ticket, an `SLA_NEAR_BREACH` notification is queued.
+
+4. **Batch updates** — all flag changes are executed in a single `prisma.$transaction`.
+
+5. **Push + in-app notifications** — if any notifications were queued, all active `ADMIN` and `SUPERVISOR` users are looked up. Their `onesignalPlayerId` values are collected and a single push is sent via `sendPushNotification`. In-app `Notification` rows are created for every (user, notification) pair using `createMany`.
+
+The task returns:
+
+| Field | Meaning |
+|---|---|
+| `checkedCount` | Total open tickets evaluated |
+| `updatedCount` | Tickets whose SLA breach flags were updated |
+| `notificationCount` | Notifications queued (push + in-app) |
+
+---
+
+## Response Format
+
+A successful cron run returns a JSON object that consolidates the outcome of all three tasks:
+
+```json
+{
+  "success": true,
+  "timestamp": "2024-01-15T02:00:00.000Z",
+  "results": {
+    "monthlyClosure": { "success": true, "expiredCount": 3 },
+    "maintenanceSchedule": { "success": true, "overdueCount": 1, "processedCount": 42, "createdCount": 38 },
+    "slaCheck": { "success": true, "checkedCount": 15, "updatedCount": 2, "notificationCount": 4 }
+  }
+}
+```
+
+If an individual task fails, its entry in `results` will contain `"success": false` and an `"error"` field with the error message, while the other tasks continue to run and report their own outcomes.
+
+<Note>
+  Each sub-task catches its own errors independently, so a failure in one task does not prevent the others from running. Always inspect each key in `results` individually — a top-level `"success": true` only means the HTTP handler itself did not crash.
+</Note>
+
+---
+
+## Manual Trigger
+
+You can invoke the cron endpoint directly to test it or to run tasks outside of the scheduled window:
+
+```bash
+curl -X GET https://your-app.vercel.app/api/cron \
+  -H "Authorization: Bearer your-cron-secret"
+```
+
+Replace `your-cron-secret` with the value of the `CRON_SECRET` environment variable. The endpoint is idempotent — running it multiple times in the same month is safe because the maintenance schedule step uses `upsert` and the near-breach notification step checks for existing records before creating duplicates.

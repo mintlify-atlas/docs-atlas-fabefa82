@@ -1,0 +1,240 @@
+---
+title: "Authenticate with HDB Service: Session Cookies and RBAC"
+sidebarTitle: "Authentication"
+description: "HDB Service uses Supabase Auth with SSR cookies for session management. Every API route validates the session and enforces role-based permissions before executing."
+---
+
+HDB Service uses [Supabase Auth](https://supabase.com/docs/guides/auth) with server-side rendered (SSR) cookies for session management. There are no API keys or Bearer tokens for regular API access — when a user logs in, Supabase sets an HTTP-only session cookie in the browser, and every subsequent API call is authenticated automatically through that cookie. The session is opaque to JavaScript running in the page, making it resistant to XSS-based token theft.
+
+## How Authentication Works
+
+Every protected API route follows the same server-side validation pipeline, implemented across `utils/supabase/server.ts`, `lib/auth.ts`, and `lib/rbac.ts`:
+
+**Step 1 — Login via Supabase Auth**
+
+The user authenticates with their email and password through Supabase's Auth system. On success, Supabase sets an HTTP-only session cookie in the browser. This cookie is the sole credential for all subsequent API calls.
+
+**Step 2 — Middleware session refresh**
+
+The Next.js middleware (`middleware.ts`) intercepts every incoming request and calls `updateSession()` from `utils/supabase/middleware.ts`. This function creates a server-side Supabase client from the incoming cookies and calls `supabase.auth.getUser()` to silently refresh the session token if it is near expiry, writing updated cookie values back to the response. This keeps long-lived sessions valid without requiring a manual re-login.
+
+```typescript
+// middleware.ts — runs on every request
+export async function middleware(request: NextRequest) {
+  const response = await updateSession(request);
+
+  if (request.method === 'GET' && request.nextUrl.pathname.startsWith('/api/')) {
+    response.headers.set('Cache-Control', 'no-store, private, max-age=0, must-revalidate');
+  }
+  return response;
+}
+```
+
+**Step 3 — Per-route permission check via `requirePermission()`**
+
+Each API route handler calls `requirePermission(permission)` from `lib/auth.ts`, passing the specific permission string required to execute that action. The function:
+
+1. Creates a server-side Supabase client via `createClient()` (reads the session cookie via `next/headers`).
+2. Calls `supabase.auth.getUser()` to retrieve the authenticated Supabase identity.
+3. Looks up the matching `User` record in PostgreSQL via Prisma, using the user's email as the join key.
+4. Verifies the user's `active` flag — inactive users are rejected as if unauthenticated.
+5. Calls `hasPermission(role, permission)` from `lib/rbac.ts` to check the role's permission set.
+6. Returns the fully-hydrated `SessionUser` object on success, or a `NextResponse` with `401`/`403` on failure.
+
+```typescript
+// Inside any protected route handler:
+const user = await requirePermission('tickets:write');
+if (user instanceof NextResponse) return user; // 401 or 403
+// user is now a SessionUser — proceed with handler logic
+```
+
+## Session User Object
+
+When authentication and authorization succeed, `requirePermission()` (and `getCurrentUser()`) return a `SessionUser` object that every route handler works with:
+
+```typescript
+// lib/auth.ts
+type SessionUser = {
+  id: string;              // Prisma User UUID (primary key in PostgreSQL)
+  authId: string;          // Supabase Auth UUID (used for admin operations)
+  email: string;           // User's email address
+  nombre: string;          // Display name
+  role: UserRole;          // ADMIN | SUPERVISOR | TECHNICIAN | CLIENT_RESPONSIBLE | CLIENT_REQUESTER
+  clientId: string | null; // Client scoping — null for internal roles (ADMIN, SUPERVISOR, TECHNICIAN)
+  plantIds: string[];      // Plant-level scoping for CLIENT_REQUESTER users
+  mustChangePassword: boolean; // Forces a password change on next login
+};
+```
+
+<Note>
+  `clientId` and `plantIds` drive automatic data scoping. `CLIENT_RESPONSIBLE` users only see records belonging to their `clientId`. `CLIENT_REQUESTER` users only see records tied to one of their `plantIds`. This is enforced server-side via `getDataFilter()` in `lib/auth.ts`.
+</Note>
+
+## Role-Based Access Control (RBAC)
+
+Every permission in the system is defined as a string literal in `lib/rbac.ts` and mapped to one or more roles in the `ROLE_PERMISSIONS` matrix. Calling `requirePermission('permission:action')` will reject the request with `403 Forbidden` if the authenticated user's role is not in the allowed set.
+
+**Available roles and their access level:**
+
+| Role | Description |
+|------|-------------|
+| `ADMIN` | Full access to all resources, user management, SLA configuration, and audit logs |
+| `SUPERVISOR` | Full operational access; cannot manage `sla_config` or `audit` |
+| `TECHNICIAN` | Read/write access to tickets, maintenance, and stock; read-only for dispensers |
+| `CLIENT_RESPONSIBLE` | Scoped to their client; can create tickets, view reports, release dispenser blocks |
+| `CLIENT_REQUESTER` | Scoped to their plant(s); can create and read tickets and view their dispensers |
+
+**Permission strings used in route guards:**
+
+```
+clients:read          clients:write
+plants:read           plants:write
+sectors:read          sectors:write
+locations:read        locations:write
+dispensers:read       dispensers:write      dispensers:assign
+dispensers:status     dispensers:release_block
+tickets:read          tickets:write         tickets:assign        tickets:close
+maintenance:read      maintenance:write
+stock:read            stock:write           stock:transfer
+users:read            users:write
+dashboard:read
+reports:read          reports:generate
+audit:read
+sla_config:write
+notifications:read
+```
+
+## GET /api/auth/me
+
+Returns the `SessionUser` object for the currently authenticated session. This endpoint is used by the frontend to hydrate the user context on page load.
+
+**Request**
+
+```
+GET /api/auth/me
+```
+
+No parameters, headers (beyond the session cookie), or request body required.
+
+**Response — Authenticated (`200 OK`)**
+
+```json
+{
+  "id": "user_01HXYZ...",
+  "authId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "email": "technician@example.com",
+  "nombre": "Carlos Rodríguez",
+  "role": "TECHNICIAN",
+  "clientId": null,
+  "plantIds": [],
+  "mustChangePassword": false
+}
+```
+
+**Response — Unauthenticated (`401 Unauthorized`)**
+
+```json
+{
+  "error": "No autenticado"
+}
+```
+
+## POST /api/auth/change-password
+
+Changes the password for the currently authenticated user. This endpoint updates the password in both Supabase Auth (via the Admin API) and in the Prisma `User` record (as a bcrypt hash), then clears the `mustChangePassword` flag.
+
+**Request**
+
+```
+POST /api/auth/change-password
+```
+
+<ParamField body="password" type="string" required>
+  The new password. Must be at least 6 characters long.
+</ParamField>
+
+**Example request body:**
+
+```json
+{
+  "password": "myNewSecurePassword123"
+}
+```
+
+**Response — Success (`200 OK`)**
+
+```json
+{
+  "success": true
+}
+```
+
+**Response — Validation Error (`400 Bad Request`)**
+
+```json
+{
+  "error": "La contraseña debe tener al menos 6 caracteres"
+}
+```
+
+**Response — Unauthenticated (`401 Unauthorized`)**
+
+```json
+{
+  "error": "No autenticado"
+}
+```
+
+## Force Password Change
+
+When an administrator creates a new user with a temporary password, the `mustChangePassword` flag is set to `true` on the Prisma `User` record. The frontend reads this flag from `GET /api/auth/me` and renders a `ForcePasswordChangeModal` that blocks access to all application pages until the user completes a password change via `POST /api/auth/change-password`. Once the password is changed successfully, the handler sets `mustChangePassword: false` in the database.
+
+<Warning>
+  The `mustChangePassword` check is enforced on the **frontend only** — it is a UX gate, not a server-side permission boundary. Always validate access with `requirePermission()` in every API route. Never rely on `mustChangePassword` alone to restrict data access.
+</Warning>
+
+## Public Routes
+
+The following routes do **not** require an authenticated session and can be called without a session cookie:
+
+| Route | Method | Description |
+|-------|--------|-------------|
+| `GET /api/health` | `GET` | Health check — verifies API and database connectivity |
+| `POST /api/public/verify` | `POST` | Cryptographically verify a maintenance approval signature hash |
+| `GET /api/public/approvals/[id]` | `GET` | View a public maintenance approval record by ID |
+| `PUT /api/public/approvals/[id]` | `PUT` | Submit a customer digital signature for a maintenance approval |
+
+The `/api/cron` route is not publicly accessible — it requires an `Authorization: Bearer <CRON_SECRET>` header matching the `CRON_SECRET` environment variable. This is used by Vercel Cron Jobs for automated daily tasks (SLA checks, maintenance schedule generation, monthly closures).
+
+## Making Authenticated Requests from External Tools
+
+HDB Service is designed for browser-based use. For external HTTP clients (curl, Postman, custom integration scripts), authentication requires one of the following approaches:
+
+**Option 1 — Export a browser session cookie (for testing)**
+
+1. Log in to the HDB Service web app in your browser.
+2. Open DevTools → Application → Cookies. Copy the Supabase session cookie (typically named `sb-*-auth-token`).
+3. Pass the cookie value in your request:
+
+```bash
+curl https://your-deployment.vercel.app/api/auth/me \
+  -H "Cookie: sb-xxxxxxxxxxxx-auth-token=your-cookie-value-here"
+```
+
+**Option 2 — Obtain a JWT via Supabase Auth REST API**
+
+Use the Supabase Auth REST API directly to exchange credentials for a session, then use the Supabase client library to make authenticated requests:
+
+```bash
+# 1. Sign in to get a session
+curl -X POST https://your-project.supabase.co/auth/v1/token?grant_type=password \
+  -H "apikey: your-supabase-anon-key" \
+  -H "Content-Type: application/json" \
+  -d '{ "email": "user@example.com", "password": "yourpassword" }'
+```
+
+The response contains an `access_token` (JWT) and a `refresh_token`. You can then use the Supabase JS/Python client library to set the session and call HDB Service API routes, or manually construct the cookie expected by `@supabase/ssr`.
+
+<Tip>
+  For automated integration testing or CI pipelines, consider creating a dedicated service account in HDB Service with the minimum required role (`TECHNICIAN` or `CLIENT_RESPONSIBLE`) and using Option 2 to programmatically obtain a session.
+</Tip>

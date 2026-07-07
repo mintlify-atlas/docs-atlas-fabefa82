@@ -1,0 +1,132 @@
+---
+title: "Deploy HDB Service to Production on Vercel"
+sidebarTitle: "Deployment"
+description: "Deploy HDB Service to Vercel with a PostgreSQL database on Supabase, configure environment variables, and set up the daily cron job."
+---
+
+HDB Service is optimised for deployment on Vercel, with Supabase serving as both the PostgreSQL database backend and the authentication provider. This pairing gives you a fully managed infrastructure stack — connection pooling via PgBouncer, row-level security, instant auth, and global edge delivery — without operating any servers yourself. The guide below covers everything from provisioning the database to verifying your first production deployment.
+
+## Prerequisites
+
+Before you begin, make sure you have:
+
+- A **Vercel** account ([vercel.com](https://vercel.com)) with a team or personal workspace
+- A **Supabase** project ([supabase.com](https://supabase.com)) on at least the free tier
+- Your HDB Service repository pushed to **GitHub** (GitLab and Bitbucket are also supported by Vercel)
+- Optionally, a custom **domain** you want to point at the deployment
+
+## Database setup (Supabase)
+
+1. **Create a new Supabase project.** In the Supabase dashboard, click **New project**, choose your organisation, set a strong database password, and select the region closest to your users.
+
+2. **Retrieve your connection strings.** Navigate to **Project Settings → Database** in the Supabase dashboard. You need two distinct connection strings:
+   - **`DATABASE_URL`** — the *pooled* connection string (via PgBouncer, port `6543`). This is what Prisma uses at runtime for all query traffic. It looks like: `postgresql://postgres.[ref]:[password]@aws-0-[region].pooler.supabase.com:6543/postgres?pgbouncer=true`
+   - **`DIRECT_URL`** — the *direct* connection string (port `5432`). Required by Prisma Migrate to run DDL statements that PgBouncer cannot handle. It looks like: `postgresql://postgres.[ref]:[password]@db.[ref].supabase.co:5432/postgres`
+
+3. **Enable Auth.** In the Supabase dashboard, go to **Authentication → Settings** and ensure the service is active. HDB Service uses `@supabase/ssr` to manage SSR-compatible session cookies, so no additional OAuth providers need to be configured unless you wish to add social login in the future.
+
+<Note>
+  Both `DATABASE_URL` and `DIRECT_URL` must be present in your Prisma schema's `datasource` block. The schema is already configured to use both via the `url` and `directUrl` fields.
+</Note>
+
+## Deploy to Vercel
+
+<Steps>
+
+  <Step title="Push the repository to GitHub">
+    Make sure your latest code — including any local configuration changes — is committed and pushed to your GitHub repository:
+
+    ```bash
+    git add .
+    git commit -m "chore: prepare for production deployment"
+    git push origin main
+    ```
+  </Step>
+
+  <Step title="Import the project in Vercel">
+    1. Go to [vercel.com/new](https://vercel.com/new) and click **Import Git Repository**.
+    2. Select your GitHub account and choose the `HDB-Service` repository.
+    3. Vercel will automatically detect it as a Next.js project and pre-fill the framework preset.
+  </Step>
+
+  <Step title="Add environment variables">
+    Before deploying, expand the **Environment Variables** section in the Vercel project setup and add every variable from your `.env.example`:
+
+    | Variable | Description |
+    |---|---|
+    | `DATABASE_URL` | Pooled Supabase connection string (PgBouncer, port 6543) |
+    | `DIRECT_URL` | Direct Supabase connection string (port 5432, for migrations) |
+    | `NEXTAUTH_URL` | Your production domain, e.g. `https://hdb.yourdomain.com` |
+    | `NEXTAUTH_SECRET` | Strong random secret, 32+ characters |
+    | `ONESIGNAL_APP_ID` | OneSignal application ID (for push notifications) |
+    | `ONESIGNAL_API_KEY` | OneSignal REST API key (for push notifications) |
+    | `APP_URL` | Same as `NEXTAUTH_URL` — used for constructing absolute links |
+    | `CRON_SECRET` | Secret token to authenticate requests to `/api/cron` |
+
+    You can add, edit, or remove environment variables at any time from **Project → Settings → Environment Variables** in the Vercel dashboard.
+  </Step>
+
+  <Step title="Set the build command">
+    In the **Build & Output Settings** section, override the default build command to ensure the Prisma Client is generated before Next.js compiles the application:
+
+    ```bash
+    npx prisma generate && next build
+    ```
+
+    This mirrors the `build` script already defined in `package.json`, so if Vercel picks up the npm script automatically you do not need to override it manually.
+  </Step>
+
+  <Step title="Deploy">
+    Click **Deploy**. Vercel will install dependencies (which also runs `prisma generate` via the `postinstall` hook), execute the build command, and publish your application to a `.vercel.app` URL.
+
+    Once the deployment succeeds, run the database migration and seed from your local machine against the production database:
+
+    ```bash
+    # Apply all pending migrations to the production database
+    npx prisma migrate deploy
+
+    # Seed the material catalog (run once on initial setup)
+    npm run seed
+    ```
+  </Step>
+
+</Steps>
+
+## Cron job
+
+HDB Service includes a daily background job that handles SLA breach detection, maintenance schedule generation, and notification dispatch. The job runs automatically on Vercel using the native cron feature configured in `vercel.json`:
+
+```json vercel.json
+{
+  "crons": [
+    {
+      "path": "/api/cron",
+      "schedule": "0 2 * * *"
+    }
+  ]
+}
+```
+
+The schedule `0 2 * * *` triggers the `/api/cron` route every day at **02:00 UTC**. Vercel sends an authenticated `GET` request to that endpoint on your behalf.
+
+To prevent unauthorised callers from triggering the cron manually, every request to `/api/cron` must include a valid `CRON_SECRET` token. Vercel automatically injects this from the environment. Make sure you have set `CRON_SECRET` to a strong, unpredictable random string in your Vercel project environment variables.
+
+<Tip>
+  You can verify the cron is running correctly from the **Vercel Dashboard → Project → Cron Jobs** tab, which shows the last execution time and any errors.
+</Tip>
+
+## Production checklist
+
+Before marking a deployment as production-ready, confirm each of the following:
+
+1. **Set `NEXTAUTH_URL`** to your production domain (e.g. `https://hdb.yourdomain.com`). An incorrect value will break session redirects and auth callbacks.
+2. **Generate a strong `NEXTAUTH_SECRET`** — at least 32 characters. Use `openssl rand -base64 32` and store the value securely. Never reuse a secret from another project.
+3. **Set `CRON_SECRET`** to a strong random token. Use `openssl rand -hex 32`. The cron endpoint will reject requests that do not present this secret.
+4. **Run `npx prisma migrate deploy`** (not `db push`) against your production database to apply all migrations in a safe, tracked manner.
+5. **Seed catalog data** by running `npm run seed` once against the production database to populate the material catalog and initial client hierarchy.
+6. **Verify `DIRECT_URL`** is set alongside `DATABASE_URL` — Prisma requires the direct connection for migration commands even though all runtime queries go through the pooler.
+7. **Confirm push notifications** are working by checking that `ONESIGNAL_APP_ID` and `ONESIGNAL_API_KEY` are set correctly and that the OneSignal app's allowed origins include your production domain.
+
+<Warning>
+  **Never use `prisma db push` in a production environment.** `db push` bypasses the migration history, can result in irreversible data loss, and leaves your schema in an untracked state. Always use `npx prisma migrate deploy` to apply schema changes in production — it applies only the pending, version-controlled migrations in the correct order.
+</Warning>

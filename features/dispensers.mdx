@@ -1,0 +1,237 @@
+---
+title: "Dispenser Management: Lifecycle, Status, and History"
+sidebarTitle: "Dispensers"
+description: "Track every water dispenser through installation, active service, repair, and retirement — with full location history, consumable records, and QR code identification."
+---
+
+Dispenser management is the core of HDB Service. Every physical water dispenser in your fleet is represented as a `Dispenser` record that carries its identity, current operational status, ownership plant, deployment location, and a rich audit trail of consumable changes, repairs, and location moves. From the moment a unit is registered until it is retired, every event is captured and queryable.
+
+## Dispenser registry
+
+Each dispenser is identified by a user-defined `id` field — typically the alphanumeric label printed or engraved on the physical unit (e.g., `DISP-A058`). The `id` must be globally unique across the entire database, and the API will reject a `POST /api/dispensers` request with `409 Conflict` if a duplicate is detected.
+
+<Note>
+  The dispenser `id` is the value encoded in its QR code, so it should exactly match the label attached to the hardware.
+</Note>
+
+Key fields registered for every dispenser:
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | `String` | **Required.** Globally unique, user-defined identifier (e.g., `DISP-A058`). |
+| `marca` | `String` | **Required.** Brand / manufacturer name. |
+| `modelo` | `String` | **Required.** Model name or number. |
+| `numeroSerie` | `String?` | Optional manufacturer serial number. |
+| `status` | `DispenserStatus` | Current operational state (see below). Defaults to `BACKUP` on creation. |
+| `plantId` | `String?` | The **home plant** that owns this dispenser. Persists even when the unit is deployed elsewhere. |
+| `locationId` | `String?` | The **active deployment location**. `null` when the unit is in repair, backup, or out of service. |
+| `clientId` | `String?` | The client who owns the dispenser. |
+| `lifecycleMonths` | `Int` | Expected service life in months. Defaults to `60` (5 years). |
+| `fechaCompra` | `DateTime?` | Purchase date. |
+| `notas` | `String?` | Free-text notes. |
+
+When a dispenser is created via `POST /api/dispensers`, you may also supply an `initialConsumables` array (each entry with a `materialCode`) to record consumables that were pre-installed at the factory or warehouse before the first deployment.
+
+```json
+// POST /api/dispensers
+{
+  "id": "DISP-A058",
+  "marca": "Purificador SA",
+  "modelo": "X-500 Pro",
+  "lifecycleMonths": 60,
+  "plantId": "plant_abc123",
+  "initialConsumables": [
+    { "materialCode": "FILTER-CARB-01" }
+  ]
+}
+```
+
+---
+
+## Status lifecycle
+
+Every dispenser has a `status` field of enum type `DispenserStatus`. The status drives which operations are available and how the lifecycle clock behaves.
+
+<CardGroup cols={2}>
+  <Card title="IN_SERVICE" icon="circle-check">
+    The dispenser is installed at an active location and fully operational. Lifecycle clock is **running**. Set automatically when a dispenser is assigned to a location.
+  </Card>
+  <Card title="BACKUP" icon="warehouse">
+    The dispenser is in reserve storage. **Lifecycle is paused** — time spent in `BACKUP` does not count toward the end-of-life calculation. `lifecyclePausedAt` is recorded on transition.
+  </Card>
+  <Card title="UNDER_REPAIR" icon="screwdriver-wrench">
+    The unit has been pulled from service for repair. The dispenser is removed from its location automatically when this status is set. Used in conjunction with `DispenserRepairHistory`.
+  </Card>
+  <Card title="OUT_OF_SERVICE" icon="circle-xmark">
+    Permanently or temporarily decommissioned. The unit is not in any location and not accumulating service time.
+  </Card>
+  <Card title="BLOCKED" icon="lock">
+    Requires an OC (purchase order) release by a `CLIENT_RESPONSIBLE` user or `ADMIN` before it can return to service. A `blockedReason` string is mandatory when transitioning to this state.
+  </Card>
+  <Card title="IN_TECHNICAL_SERVICE" icon="gear">
+    Sent to an external technical service center for specialized maintenance or calibration.
+  </Card>
+</CardGroup>
+
+### Common state transitions
+
+<Steps>
+  <Step title="Registration → BACKUP">
+    All dispensers start in `BACKUP` status upon creation. They are not yet deployed to any location.
+  </Step>
+  <Step title="BACKUP → IN_SERVICE">
+    Triggered by a successful assignment to a location (`POST /api/dispensers/[id]/assign`). The lifecycle clock **resumes** and accumulated pause days are recorded.
+  </Step>
+  <Step title="IN_SERVICE → UNDER_REPAIR">
+    Set manually via `PUT /api/dispensers/[id]/status`. The dispenser is automatically unlinked from its current location and a `DispenserLocationHistory` entry is closed with `removedAt`.
+  </Step>
+  <Step title="IN_SERVICE → BLOCKED">
+    Typically triggered when a client raises a compliance issue. Requires a `reason`. Email notifications are sent automatically to `CLIENT_RESPONSIBLE` and `CLIENT_REQUESTER` users for the affected plant.
+  </Step>
+  <Step title="BLOCKED → IN_SERVICE">
+    Requires the `dispensers:release_block` permission (only `ADMIN` and `CLIENT_RESPONSIBLE` hold this permission). The `blockedReason` and `blockedAt` fields are cleared.
+  </Step>
+  <Step title="UNDER_REPAIR / OUT_OF_SERVICE → BACKUP">
+    Returns the unit to reserve storage and resumes lifecycle pause tracking.
+  </Step>
+</Steps>
+
+<Warning>
+  Transitioning to `BLOCKED` without providing a `reason` will return `400 Bad Request`. Always supply a clear `reason` string describing the blocking cause so that `CLIENT_RESPONSIBLE` users can act on it.
+</Warning>
+
+---
+
+## Location assignment
+
+A dispenser is deployed to a physical spot in the building hierarchy (`Client → Plant → Sector → Location`) by calling `POST /api/dispensers/[id]/assign`.
+
+```json
+// POST /api/dispensers/DISP-A058/assign
+{
+  "locationId": "loc_floor3_cafeteria",
+  "force": false
+}
+```
+
+The assignment endpoint enforces the following business rules:
+
+- **One active dispenser per location** — if the target location already has an `IN_SERVICE` dispenser, the request is rejected with `409 Conflict`.
+- **Re-assignment guard** — if the dispenser is already assigned to a *different* location, you must pass `"force": true` to close the previous assignment and open a new one.
+- **Lifecycle start** — if the dispenser has never been assigned before (`lifecycleStartDate` is `null`), `lifecycleStartDate` is set to the current timestamp on first assignment.
+- **Lifecycle resume** — if the dispenser is coming from `BACKUP`, any accumulated pause days are added to `lifecycleAccumulatedPauseDays` and `lifecyclePausedAt` is cleared.
+
+Every assignment writes a `DispenserLocationHistory` record. When a dispenser leaves a location (via re-assignment, repair, or backup), the open history entry is closed by setting `removedAt`.
+
+```typescript
+// DispenserLocationHistory fields
+{
+  dispenserId:  string,   // dispenser ID
+  locationId:   string,   // location ID
+  assignedAt:   DateTime, // when the assignment was made
+  removedAt:    DateTime | null, // null = currently active
+  assignedById: string | null    // user who performed the assignment
+}
+```
+
+---
+
+## Consumable tracking
+
+Every consumable installed in a dispenser is recorded in `DispenserConsumableHistory`. This gives you a complete audit trail of which materials were in each unit, when they were replaced, and when they expire.
+
+| Field | Description |
+|---|---|
+| `materialCode` | Internal code from `MaterialCatalog`. |
+| `nombre` | Material display name at time of installation. |
+| `consumableId` | Optional link to a specific serialized `Consumable` stock unit. |
+| `installedAt` | Timestamp of installation (default: `now()`). |
+| `removedAt` | Set when the consumable is replaced. `null` = currently installed. |
+| `expiresAt` | Calculated as `installedAt + catalog.expirationMonths`. `null` if the material has no expiration. |
+| `installedById` | User who performed the installation. |
+
+<Tip>
+  The `expiresAt` field is indexed so you can efficiently query dispensers with expiring consumables and trigger proactive replacement reminders.
+</Tip>
+
+When a checklist is submitted for a maintenance visit (see [Maintenance](/features/maintenance)), the system automatically closes the current open consumable record (`removedAt = now()`) and writes a new `DispenserConsumableHistory` entry for each consumable marked as used.
+
+---
+
+## Repair history
+
+When a dispenser requires corrective repair, the event is tracked in `DispenserRepairHistory`. This model is linked to the dispenser and the technician who performed the work.
+
+| Field | Type | Description |
+|---|---|---|
+| `descripcion` | `String` | Text description of the problem. |
+| `diagnostico` | `String?` | Technical diagnosis. |
+| `partesUsadas` | `Json?` | Array of `{ materialCode, nombre, cantidad }` objects listing parts consumed. |
+| `costo` | `Float?` | Total repair cost. |
+| `startDate` | `DateTime` | When repair work began. |
+| `endDate` | `DateTime?` | When repair was completed. `null` = repair in progress. |
+| `technicianId` | `String` | The technician who performed the repair. |
+
+```json
+// Example partesUsadas value
+[
+  { "materialCode": "PUMP-001", "nombre": "Bomba de presión", "cantidad": 1 },
+  { "materialCode": "SEAL-KIT", "nombre": "Kit de sellos", "cantidad": 2 }
+]
+```
+
+The detail endpoint `GET /api/dispensers/[id]` returns the last 20 repair history records, ordered by `startDate` descending.
+
+---
+
+## QR codes
+
+Every dispenser is uniquely identifiable by a QR code that encodes its `id`. The QR is generated server-side using the `qrcode` npm library.
+
+The `lib/qr.ts` helper `extractDispenserId` can parse QR payloads in three formats:
+
+| Input format | Example | Result |
+|---|---|---|
+| Full app URL | `https://hdb-service.com/qr/DISP-A058` | `DISP-A058` |
+| Path segment | `/dispensers/DISP-A058` | `DISP-A058` |
+| Raw ID string | `DISP-A058` | `DISP-A058` |
+
+IDs are normalized to **uppercase** and validated against the `DISP-` prefix before returning.
+
+<Tip>
+  Any authenticated user can navigate to `/qr/scan` to open the in-app QR scanner. Scanning a dispenser QR immediately opens its detail page, from where a ticket can be raised in one tap. This is particularly useful for `CLIENT_REQUESTER` users reporting issues from the floor.
+</Tip>
+
+---
+
+## Lifecycle tracking
+
+HDB Service tracks the operational age of each dispenser, pausing the clock whenever the unit is not in active service.
+
+| Field | Description |
+|---|---|
+| `lifecycleMonths` | Configured service life (default: `60` months). |
+| `lifecycleStartDate` | Set on first location assignment. |
+| `lifecyclePausedAt` | Timestamp when the unit entered `BACKUP` status. `null` if clock is running. |
+| `lifecycleAccumulatedPauseDays` | Sum of all days spent in `BACKUP` across the unit's lifetime. |
+
+The `GET /api/dispensers/[id]` response includes two computed fields:
+
+- **`lifecycleExpiration`** — absolute date when the lifecycle ends, calculated as `lifecycleStartDate + (lifecycleMonths × 30 days) + lifecycleAccumulatedPauseDays`.
+- **`lifecycleRemainingDays`** — days remaining until expiration. If the unit is currently paused, days since `lifecyclePausedAt` are excluded from the calculation.
+
+<Note>
+  Time spent in `UNDER_REPAIR`, `OUT_OF_SERVICE`, `BLOCKED`, or `IN_TECHNICAL_SERVICE` **does** count toward the lifecycle. Only `BACKUP` status pauses the clock.
+</Note>
+
+---
+
+## Required permissions
+
+| Permission | Roles |
+|---|---|
+| `dispensers:read` | ADMIN, SUPERVISOR, TECHNICIAN, CLIENT_RESPONSIBLE, CLIENT_REQUESTER |
+| `dispensers:write` | ADMIN, SUPERVISOR |
+| `dispensers:assign` | ADMIN, SUPERVISOR |
+| `dispensers:status` | ADMIN, SUPERVISOR, TECHNICIAN |
+| `dispensers:release_block` | ADMIN, CLIENT_RESPONSIBLE |

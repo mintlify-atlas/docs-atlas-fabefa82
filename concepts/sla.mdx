@@ -1,0 +1,182 @@
+---
+title: "SLA Enforcement and Deadline Calculation"
+sidebarTitle: "SLA"
+description: "HDB Service enforces per-priority SLA deadlines on every ticket, tracks breach status in real time, and notifies stakeholders when deadlines approach or are missed."
+---
+
+Every ticket created in HDB Service is automatically assigned two SLA deadlines — a **response deadline** and a **resolution deadline** — calculated from the ticket's creation timestamp and its priority level. These deadlines are tracked in real time: the system continuously evaluates whether a ticket is on track, approaching a breach, or already breached, and sends notifications to ADMIN and SUPERVISOR users accordingly. All SLA logic lives in `lib/sla.ts` and the associated `SlaConfig` Prisma model.
+
+---
+
+## SLA configuration
+
+SLA time limits are configured per Client via the `SlaConfig` model. A Client without a custom config automatically falls back to the platform defaults. Each config stores independent **response** and **resolution** times (in minutes) for each of the four ticket priorities.
+
+```prisma
+model SlaConfig {
+  id       String @id @default(cuid())
+  clientId String @unique
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  // Response times (minutes)
+  responseTimeLow      Int @default(480)   // 8 hours
+  responseTimeMedium   Int @default(240)   // 4 hours
+  responseTimeHigh     Int @default(120)   // 2 hours
+  responseTimeCritical Int @default(60)    // 1 hour
+
+  // Resolution times (minutes)
+  resolutionTimeLow      Int @default(4320) // 72 hours
+  resolutionTimeMedium   Int @default(1440) // 24 hours
+  resolutionTimeHigh     Int @default(480)  // 8 hours
+  resolutionTimeCritical Int @default(240)  // 4 hours
+
+  nearBreachPercent Int @default(80)       // 80% of deadline triggers NEAR_BREACH
+}
+```
+
+### Default SLA values
+
+The platform defaults (from `lib/sla.ts`) apply when no client-specific config exists:
+
+| Priority | Response Time | Resolution Time |
+|----------|--------------|-----------------|
+| `LOW` | 480 min (8 h) | 4320 min (72 h) |
+| `MEDIUM` | 240 min (4 h) | 1440 min (24 h) |
+| `HIGH` | 120 min (2 h) | 480 min (8 h) |
+| `CRITICAL` | 60 min (1 h) | 240 min (4 h) |
+
+---
+
+## Deadline calculation
+
+When a ticket is created, `calculateSlaDeadlines()` is called with the creation timestamp, the ticket's priority, and the client's SLA config (or `null` to use platform defaults). It returns both deadlines, which are stored on the `Ticket` row as `slaResponseDeadline` and `slaResolutionDeadline`.
+
+**Function signature:**
+
+```typescript
+export function calculateSlaDeadlines(
+  createdAt: Date,
+  priority: TicketPriority,
+  config?: SlaConfigData | null
+): {
+  responseDeadline: Date;
+  resolutionDeadline: Date;
+}
+```
+
+**Usage example:**
+
+```typescript
+import { calculateSlaDeadlines } from '@/lib/sla';
+
+// Ticket created now with HIGH priority, using client config
+const { responseDeadline, resolutionDeadline } = calculateSlaDeadlines(
+  new Date(),          // createdAt
+  'HIGH',              // priority
+  clientSlaConfig      // SlaConfigData | null
+);
+
+// With default SLA (no custom config):
+// responseDeadline  = now + 120 minutes (2 hours)
+// resolutionDeadline = now + 480 minutes (8 hours)
+```
+
+Internally, the function calls `getResponseTime()` and `getResolutionTime()` helpers (also exported from `lib/sla.ts`) to look up the correct minutes for the given priority and config, then uses `date-fns` `addMinutes()` to produce the deadline timestamps.
+
+---
+
+## SLA status
+
+At any point in a ticket's life, its SLA status can be one of three values:
+
+| Status | Meaning |
+|--------|---------|
+| `ON_TIME` | Elapsed time is below the near-breach threshold — the ticket is progressing within SLA. |
+| `NEAR_BREACH` | Elapsed time has exceeded `nearBreachPercent`% of the total SLA window but the deadline has not yet passed. |
+| `BREACHED` | The deadline timestamp is in the past — the SLA has been missed. |
+
+The threshold is controlled by `nearBreachPercent` (default **80%**). For example, on a `HIGH` priority response window of 120 minutes, `NEAR_BREACH` is triggered once 96 minutes (80% × 120) have elapsed.
+
+**Function signature:**
+
+```typescript
+export function getSlaStatus(
+  deadline: Date,
+  nearBreachPercent: number = 80,
+  totalMinutes: number,
+  createdAt: Date
+): SlaStatus
+```
+
+**Example — evaluating a CRITICAL ticket:**
+
+```typescript
+import { getSlaStatus, getResolutionTime } from '@/lib/sla';
+
+const totalMinutes = getResolutionTime('CRITICAL'); // 240 min
+
+const status = getSlaStatus(
+  ticket.slaResolutionDeadline,
+  80,           // nearBreachPercent
+  totalMinutes,
+  ticket.createdAt
+);
+// 'ON_TIME' | 'NEAR_BREACH' | 'BREACHED'
+```
+
+---
+
+## Breach detection
+
+HDB Service runs a **scheduled cron job daily at 2 AM** that scans all open tickets (`OPEN` or `IN_PROGRESS`) and evaluates their SLA deadlines against the current time. For each ticket the job:
+
+<Steps>
+  <Step title="Check response breach">
+    If `slaResponseDeadline` is in the past and `slaResponseBreached` is still `false`, the field is set to `true` and the ticket record is updated.
+  </Step>
+  <Step title="Check resolution breach">
+    If `slaResolutionDeadline` is in the past and `slaResolutionBreached` is still `false`, the field is set to `true` and the ticket record is updated.
+  </Step>
+  <Step title="Send notifications">
+    For every newly breached ticket, the cron job sends both a **push notification** (via OneSignal) and an **in-app `Notification` record** to all users with the `ADMIN` or `SUPERVISOR` role, including the ticket ID and breached deadline type in the payload.
+  </Step>
+</Steps>
+
+The `slaResponseBreached` and `slaResolutionBreached` boolean fields on the `Ticket` model are the authoritative breach markers used for reporting, dashboard metrics, and SLA compliance calculations.
+
+```typescript
+// SLA compliance calculation (lib/sla.ts)
+export function calculateSlaCompliance(
+  tickets: Array<{
+    slaResolutionBreached: boolean;
+    status: string;
+    resolvedAt: Date | null;
+    slaResolutionDeadline: Date | null;
+  }>
+): number
+// Returns a 0–100 percentage of resolved tickets that met their SLA deadline.
+```
+
+---
+
+## SLA filtering in the API
+
+The `GET /api/tickets` endpoint accepts a `slaStatus` query parameter that filters the result set to tickets currently in the requested SLA state. The status is computed at query time using `getSlaStatus()` — it is **not** stored as a column.
+
+| `slaStatus` value | Returns |
+|-------------------|---------|
+| `ON_TIME` | Open tickets where elapsed time is below the near-breach threshold |
+| `NEAR_BREACH` | Open tickets past the threshold but deadline not yet expired |
+| `BREACHED` | Tickets whose resolution deadline has passed (or `slaResolutionBreached === true`) |
+
+**Example request:**
+
+```bash
+GET /api/tickets?slaStatus=NEAR_BREACH&priority=HIGH
+```
+
+This returns all open `HIGH` priority tickets that are currently approaching their SLA deadline — useful for supervisor dashboards and proactive escalation workflows.
+
+<Tip>
+  Per-client SLA configuration can be set by **ADMIN** users via the settings UI or directly via the API (`sla_config:write` permission required). Clients without a custom `SlaConfig` record automatically inherit the platform defaults defined in `lib/sla.ts` — no manual configuration is needed to get started.
+</Tip>

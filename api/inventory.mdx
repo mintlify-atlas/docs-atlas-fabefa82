@@ -1,0 +1,498 @@
+---
+title: "Inventory API Endpoints — Stock, Transfers, and Debts"
+sidebarTitle: "Inventory"
+description: "REST API reference for inventory management: list and adjust stock entries, transfer between plants, manage serialized consumables, and resolve inter-plant debt records."
+---
+
+The Inventory API manages all stock-related operations in HDB Service. Stock entries are scoped to a specific plant and track both bulk consumables (e.g., filters, cartridges counted by quantity) and serialized consumables that require a unique tracking ID per unit. When stock is shared between plants in an emergency, the system automatically records an inter-plant debt that must later be resolved either manually or via a follow-up transfer.
+
+All endpoints require an authenticated session with a valid Supabase Auth cookie. Permissions are enforced through the RBAC matrix — see the permission column on each endpoint below.
+
+---
+
+## GET /api/stock
+
+Returns a list of stock entries visible to the authenticated user. Results are automatically scoped by role: `CLIENT_REQUESTER` users see only entries for their assigned plants, while `ADMIN` and `SUPERVISOR` users see all entries. Each entry includes a `serialNumbers` array populated from active `Consumable` records that have a `uniqueId`.
+
+**Required permission:** `stock:read`
+
+<ParamField query="clientId" type="string">
+  Filter entries by client ID. Ignored for `CLIENT_REQUESTER` users (scope is enforced server-side).
+</ParamField>
+
+<ParamField query="plantId" type="string">
+  Filter entries by plant ID.
+</ParamField>
+
+<ParamField query="itemType" type="string">
+  Filter by item type. Must be `CONSUMABLE` or `SPARE_PART`.
+</ParamField>
+
+<ParamField query="lowStockOnly" type="boolean">
+  When `true`, returns only entries where `cantidad < minLevel` and `minLevel > 0`.
+</ParamField>
+
+<ResponseField name="id" type="string">Unique stock entry ID.</ResponseField>
+<ResponseField name="clientId" type="string">Owning client ID.</ResponseField>
+<ResponseField name="plantId" type="string">Owning plant ID.</ResponseField>
+<ResponseField name="itemType" type="string">`CONSUMABLE` or `SPARE_PART`.</ResponseField>
+<ResponseField name="materialCode" type="string">Unique catalog material code.</ResponseField>
+<ResponseField name="nombre" type="string">Material display name.</ResponseField>
+<ResponseField name="cantidad" type="number">Current stock quantity.</ResponseField>
+<ResponseField name="minLevel" type="number">Low-stock alert threshold.</ResponseField>
+<ResponseField name="maxLevel" type="number">Reorder target quantity.</ResponseField>
+<ResponseField name="unidad" type="string">Unit of measure (e.g., `"unidad"`, `"litro"`).</ResponseField>
+<ResponseField name="serialNumbers" type="string[]">Array of unique IDs of active serialized consumables for this plant + material combination.</ResponseField>
+<ResponseField name="client" type="object">
+  <Expandable title="client fields">
+    <ResponseField name="nombre" type="string">Client display name.</ResponseField>
+  </Expandable>
+</ResponseField>
+<ResponseField name="plant" type="object">
+  <Expandable title="plant fields">
+    <ResponseField name="nombre" type="string">Plant display name.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+```bash
+curl -X GET "https://your-domain.com/api/stock?plantId=plant_abc&lowStockOnly=true" \
+  -H "Cookie: sb-access-token=<token>"
+```
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `401` | Not authenticated. |
+| `403` | Insufficient permission (`stock:read` required). |
+| `500` | Internal server error fetching stock entries. |
+
+---
+
+## POST /api/stock
+
+Creates a new stock entry or increments an existing one. The `materialCode` must match a record in the `MaterialCatalog`. If the catalog item has `requiresSerial: true`, a `uniqueId` is required and a `Consumable` record is created before the stock entry is upserted. For serialized materials, quantity is always incremented by `1` regardless of the `cantidad` value sent.
+
+**Required permission:** `stock:write`
+
+<ParamField body="clientId" type="string" required>
+  ID of the client that owns this stock entry.
+</ParamField>
+
+<ParamField body="plantId" type="string" required>
+  ID of the plant where stock is held.
+</ParamField>
+
+<ParamField body="materialCode" type="string" required>
+  Code of an existing `MaterialCatalog` entry. Returns `400` if not found.
+</ParamField>
+
+<ParamField body="cantidad" type="number">
+  Quantity to add. For bulk (non-serialized) materials, this value is incremented onto the existing entry. Ignored for serialized materials (always `+1`). Defaults to `0` if omitted.
+</ParamField>
+
+<ParamField body="minLevel" type="number">
+  Low-stock alert threshold. Updates the existing entry if one already exists.
+</ParamField>
+
+<ParamField body="maxLevel" type="number">
+  Reorder target quantity. Updates the existing entry if one already exists.
+</ParamField>
+
+<ParamField body="unidad" type="string">
+  Unit of measure. Defaults to `"unidad"`.
+</ParamField>
+
+<ParamField body="uniqueId" type="string">
+  Serial number for the consumable unit. **Required** when the catalog item has `requiresSerial: true`. Must be globally unique across all `Consumable` records.
+</ParamField>
+
+<ResponseField name="id" type="string">Stock entry ID.</ResponseField>
+<ResponseField name="clientId" type="string">Owning client ID.</ResponseField>
+<ResponseField name="plantId" type="string">Owning plant ID.</ResponseField>
+<ResponseField name="itemType" type="string">Derived from the catalog item's `type` field.</ResponseField>
+<ResponseField name="materialCode" type="string">Catalog material code.</ResponseField>
+<ResponseField name="nombre" type="string">Material name sourced from the catalog.</ResponseField>
+<ResponseField name="cantidad" type="number">Updated stock quantity after upsert.</ResponseField>
+<ResponseField name="minLevel" type="number">Alert threshold.</ResponseField>
+<ResponseField name="maxLevel" type="number">Reorder target.</ResponseField>
+<ResponseField name="unidad" type="string">Unit of measure.</ResponseField>
+
+```bash
+curl -X POST "https://your-domain.com/api/stock" \
+  -H "Content-Type: application/json" \
+  -H "Cookie: sb-access-token=<token>" \
+  -d '{
+    "clientId": "client_abc",
+    "plantId": "plant_xyz",
+    "materialCode": "FILT-001",
+    "cantidad": 10,
+    "minLevel": 5,
+    "maxLevel": 50,
+    "unidad": "unidad"
+  }'
+```
+
+<Note>
+  To add a serialized consumable (e.g., a membrane with a serial number), include `"uniqueId": "SN-00123"`. The system will create a `Consumable` record and increment the stock entry by exactly `1`.
+</Note>
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `400` | Missing required fields (`clientId`, `plantId`, or `materialCode`). |
+| `400` | `materialCode` not found in the material catalog. |
+| `400` | Material requires a serial number (`requiresSerial: true`) but `uniqueId` was not provided. |
+| `400` | The `uniqueId` is already registered to another consumable record. |
+| `401` | Not authenticated. |
+| `403` | Insufficient permission (`stock:write` required). |
+| `500` | Internal server error. |
+
+---
+
+## POST /api/stock/[id]/adjust
+
+Performs an inventory adjustment on an existing stock entry. Supports two actions: `ADJUST_QTY` sets the quantity to a new absolute value, and `DELETE` removes the stock entry entirely and deactivates all associated `Consumable` records. A justification is always required. All adjustments are written to the audit log and push a push notification to all `SUPERVISOR` and `ADMIN` users via OneSignal.
+
+**Required permission:** `stock:write`
+
+<ParamField body="action" type="string" required>
+  `ADJUST_QTY` to set a new quantity, or `DELETE` to remove the entry entirely.
+</ParamField>
+
+<ParamField body="justificacion" type="string" required>
+  Human-readable reason for the adjustment. Cannot be blank.
+</ParamField>
+
+<ParamField body="newCantidad" type="number">
+  New absolute quantity. Required when `action` is `ADJUST_QTY`. Must be `>= 0`.
+</ParamField>
+
+<ResponseField name="success" type="boolean">`true` on successful completion.</ResponseField>
+<ResponseField name="action" type="string">Echo of the action performed: `STOCK_ADJUST` or `STOCK_DELETE`.</ResponseField>
+<ResponseField name="oldState" type="object">
+  <Expandable title="oldState fields">
+    <ResponseField name="id" type="string">Stock entry ID.</ResponseField>
+    <ResponseField name="materialCode" type="string">Catalog material code.</ResponseField>
+    <ResponseField name="nombre" type="string">Material name.</ResponseField>
+    <ResponseField name="cantidad" type="number">Quantity before the adjustment.</ResponseField>
+    <ResponseField name="plantId" type="string">Plant ID.</ResponseField>
+    <ResponseField name="plantNombre" type="string">Plant display name.</ResponseField>
+    <ResponseField name="minLevel" type="number">Alert threshold before adjustment.</ResponseField>
+    <ResponseField name="maxLevel" type="number">Reorder target before adjustment.</ResponseField>
+  </Expandable>
+</ResponseField>
+<ResponseField name="newState" type="object">
+  <Expandable title="newState fields">
+    <ResponseField name="id" type="string">Stock entry ID (absent on `DELETE`).</ResponseField>
+    <ResponseField name="cantidad" type="number">New quantity (absent on `DELETE`).</ResponseField>
+    <ResponseField name="cantidadAnterior" type="number">Previous quantity (present on `ADJUST_QTY` only).</ResponseField>
+    <ResponseField name="deleted" type="boolean">`true` when action was `DELETE`.</ResponseField>
+    <ResponseField name="justificacion" type="string">Justification text recorded in the audit log.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+```bash
+curl -X POST "https://your-domain.com/api/stock/se_abc123/adjust" \
+  -H "Content-Type: application/json" \
+  -H "Cookie: sb-access-token=<token>" \
+  -d '{
+    "action": "ADJUST_QTY",
+    "justificacion": "Physical count after quarterly audit",
+    "newCantidad": 42
+  }'
+```
+
+<Warning>
+  The `DELETE` action permanently removes the stock entry and sets all associated serialized `Consumable` records to `active: false`. This action is irreversible and is recorded in the audit log with the full previous state.
+</Warning>
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `400` | `justificacion` is blank or missing. |
+| `400` | `action` is not `DELETE` or `ADJUST_QTY`. |
+| `400` | `newCantidad` is not a non-negative number (when using `ADJUST_QTY`). |
+| `404` | Stock entry with the given `id` not found. |
+| `401` | Not authenticated. |
+| `403` | Insufficient permission (`stock:write` required). |
+| `500` | Internal server error. |
+
+---
+
+## GET /api/stock/available
+
+Returns all consumables and spare parts that are currently in stock and uninstalled for a given plant. The response combines two sources: bulk stock entries (where `cantidad > 0`, after subtracting out serialized units) and individual active `Consumable` records that have a `uniqueId`. This endpoint is used to populate installation selection lists in the UI.
+
+**Required permission:** `stock:read`
+
+<ParamField query="plantId" type="string">
+  Plant ID to filter available items. Pass `"all"` or omit to retrieve across all plants visible to the authenticated user.
+</ParamField>
+
+<ResponseField name="type" type="string">`BULK` for non-serialized quantities; `SERIALIZED` for individual tracked units.</ResponseField>
+<ResponseField name="plantId" type="string">Plant where the item is held.</ResponseField>
+<ResponseField name="materialCode" type="string">Catalog material code.</ResponseField>
+<ResponseField name="nombre" type="string">Material display name.</ResponseField>
+<ResponseField name="maxQuantity" type="number">Maximum installable quantity. Always `1` for `SERIALIZED` items.</ResponseField>
+<ResponseField name="label" type="string">Human-readable display label for UI dropdowns.</ResponseField>
+<ResponseField name="id" type="string">Consumable record ID. Present on `SERIALIZED` items only.</ResponseField>
+<ResponseField name="uniqueId" type="string">Serial number. Present on `SERIALIZED` items only.</ResponseField>
+<ResponseField name="expirationMonths" type="number">Months until expiration after installation. Present on `SERIALIZED` items only (nullable).</ResponseField>
+
+```bash
+curl -X GET "https://your-domain.com/api/stock/available?plantId=plant_xyz" \
+  -H "Cookie: sb-access-token=<token>"
+```
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `401` | Not authenticated. |
+| `403` | Insufficient permission (`stock:read` required). |
+| `500` | Internal server error. |
+
+---
+
+## GET /api/stock/transfer
+
+Returns a list of past stock transfers. Results are automatically scoped by role: `CLIENT_REQUESTER` users see only transfers involving their assigned plants; `CLIENT_RESPONSIBLE` users see transfers for their client's plants; `ADMIN` and `SUPERVISOR` users see all transfers.
+
+**Required permission:** `stock:read`
+
+<ParamField query="plantId" type="string">
+  Further filter to transfers where this plant is either the source or the destination.
+</ParamField>
+
+<ResponseField name="id" type="string">Transfer record ID.</ResponseField>
+<ResponseField name="fromPlantId" type="string">Source plant ID.</ResponseField>
+<ResponseField name="toPlantId" type="string">Destination plant ID.</ResponseField>
+<ResponseField name="itemType" type="string">`CONSUMABLE` or `SPARE_PART`.</ResponseField>
+<ResponseField name="materialCode" type="string">Catalog material code.</ResponseField>
+<ResponseField name="nombre" type="string">Material name at time of transfer.</ResponseField>
+<ResponseField name="cantidad" type="number">Units transferred.</ResponseField>
+<ResponseField name="status" type="string">`COMPLETED`, `PENDING`, or `CANCELLED`.</ResponseField>
+<ResponseField name="createdAt" type="string">ISO 8601 timestamp of when the transfer was initiated.</ResponseField>
+<ResponseField name="completedAt" type="string">ISO 8601 timestamp of completion (nullable).</ResponseField>
+<ResponseField name="fromPlant" type="object">
+  <Expandable title="fromPlant fields">
+    <ResponseField name="nombre" type="string">Source plant name.</ResponseField>
+  </Expandable>
+</ResponseField>
+<ResponseField name="toPlant" type="object">
+  <Expandable title="toPlant fields">
+    <ResponseField name="nombre" type="string">Destination plant name.</ResponseField>
+  </Expandable>
+</ResponseField>
+<ResponseField name="transferredBy" type="object">
+  <Expandable title="transferredBy fields">
+    <ResponseField name="nombre" type="string">Name of the user who performed the transfer.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+```bash
+curl -X GET "https://your-domain.com/api/stock/transfer?plantId=plant_xyz" \
+  -H "Cookie: sb-access-token=<token>"
+```
+
+---
+
+## POST /api/stock/transfer
+
+Transfers stock from one plant to another within the same client. The operation is executed inside a single database transaction: the source stock is decremented, the destination is upserted, the transfer record is created with status `COMPLETED`, and any matching `PENDING` inter-plant debts from the source plant to the destination plant for the same material are automatically resolved (partially or fully, in FIFO order).
+
+**Required permission:** `stock:transfer`
+
+<ParamField body="fromPlantId" type="string" required>
+  ID of the plant sending the stock.
+</ParamField>
+
+<ParamField body="toPlantId" type="string" required>
+  ID of the plant receiving the stock. Must be different from `fromPlantId`.
+</ParamField>
+
+<ParamField body="itemType" type="string" required>
+  `CONSUMABLE` or `SPARE_PART`.
+</ParamField>
+
+<ParamField body="materialCode" type="string" required>
+  Catalog material code to transfer.
+</ParamField>
+
+<ParamField body="cantidad" type="number" required>
+  Units to transfer. Must be greater than `0` and not exceed the source plant's current stock.
+</ParamField>
+
+<ParamField body="nombre" type="string">
+  Override the material name on the transfer record. Falls back to the source stock entry's `nombre`.
+</ParamField>
+
+<ResponseField name="id" type="string">Transfer record ID.</ResponseField>
+<ResponseField name="fromPlantId" type="string">Source plant ID.</ResponseField>
+<ResponseField name="toPlantId" type="string">Destination plant ID.</ResponseField>
+<ResponseField name="itemType" type="string">Item type transferred.</ResponseField>
+<ResponseField name="materialCode" type="string">Material code transferred.</ResponseField>
+<ResponseField name="nombre" type="string">Material name on the record.</ResponseField>
+<ResponseField name="cantidad" type="number">Units transferred.</ResponseField>
+<ResponseField name="status" type="string">Always `COMPLETED` for transfers created via this endpoint.</ResponseField>
+<ResponseField name="createdAt" type="string">ISO 8601 creation timestamp.</ResponseField>
+<ResponseField name="completedAt" type="string">ISO 8601 completion timestamp.</ResponseField>
+
+```bash
+curl -X POST "https://your-domain.com/api/stock/transfer" \
+  -H "Content-Type: application/json" \
+  -H "Cookie: sb-access-token=<token>" \
+  -d '{
+    "fromPlantId": "plant_north",
+    "toPlantId": "plant_south",
+    "itemType": "CONSUMABLE",
+    "materialCode": "FILT-001",
+    "cantidad": 5
+  }'
+```
+
+<Note>
+  If the source plant has outstanding debts to the destination plant for the same `materialCode`, those debts are resolved automatically in FIFO order as part of the same transaction. No separate debt-resolution call is needed.
+</Note>
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `400` | Missing required fields. |
+| `400` | `cantidad` is `<= 0`. |
+| `400` | `fromPlantId` equals `toPlantId`. |
+| `400` | Source stock entry does not exist or has insufficient quantity. |
+| `404` | Destination plant not found. |
+| `401` | Not authenticated. |
+| `403` | Insufficient permission (`stock:transfer` required). |
+| `500` | Internal server error (transaction rolled back). |
+
+---
+
+## GET /api/stock/debts
+
+Returns inter-plant debt records. A debt is created when one plant uses consumables that belong to another plant (e.g., during an urgent repair). Results are scoped by role in the same way as the transfers endpoint.
+
+**Required permission:** `stock:read`
+
+<ParamField query="plantId" type="string">
+  Filter to debts where this plant is either the creditor or the debtor.
+</ParamField>
+
+<ParamField query="status" type="string">
+  Filter by debt status. One of `PENDING` (default) or `RESOLVED`.
+</ParamField>
+
+<ResponseField name="id" type="string">Debt record ID.</ResponseField>
+<ResponseField name="creditorPlantId" type="string">ID of the plant that is owed stock.</ResponseField>
+<ResponseField name="debtorPlantId" type="string">ID of the plant that owes stock.</ResponseField>
+<ResponseField name="materialCode" type="string">Catalog material code.</ResponseField>
+<ResponseField name="nombre" type="string">Material name.</ResponseField>
+<ResponseField name="cantidad" type="number">Units owed.</ResponseField>
+<ResponseField name="consumableId" type="string">Linked `Consumable` record ID (nullable).</ResponseField>
+<ResponseField name="status" type="string">`PENDING` or `RESOLVED`.</ResponseField>
+<ResponseField name="createdAt" type="string">ISO 8601 creation timestamp.</ResponseField>
+<ResponseField name="resolvedAt" type="string">ISO 8601 resolution timestamp (nullable).</ResponseField>
+<ResponseField name="creditorPlant" type="object">
+  <Expandable title="creditorPlant fields">
+    <ResponseField name="nombre" type="string">Creditor plant name.</ResponseField>
+  </Expandable>
+</ResponseField>
+<ResponseField name="debtorPlant" type="object">
+  <Expandable title="debtorPlant fields">
+    <ResponseField name="nombre" type="string">Debtor plant name.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+```bash
+curl -X GET "https://your-domain.com/api/stock/debts?plantId=plant_south&status=PENDING" \
+  -H "Cookie: sb-access-token=<token>"
+```
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `401` | Not authenticated. |
+| `403` | Insufficient permission (`stock:read` required). |
+| `500` | Internal server error. |
+
+---
+
+## POST /api/stock/debts/[id]/resolve
+
+Marks an inter-plant debt as `RESOLVED` and records the resolution timestamp. This endpoint accepts both `POST` and `PATCH` methods. Note that if the debt was created as part of a transfer, it may already have been resolved automatically — calling this endpoint on an already-resolved debt returns a `400` error. The action is written to the audit log.
+
+**Required permission:** `stock:write`
+
+<Note>
+  This endpoint accepts both `POST` and `PATCH` with identical behavior. No request body is required.
+</Note>
+
+<ResponseField name="id" type="string">Debt record ID.</ResponseField>
+<ResponseField name="creditorPlantId" type="string">Creditor plant ID.</ResponseField>
+<ResponseField name="debtorPlantId" type="string">Debtor plant ID.</ResponseField>
+<ResponseField name="materialCode" type="string">Material code.</ResponseField>
+<ResponseField name="nombre" type="string">Material name.</ResponseField>
+<ResponseField name="cantidad" type="number">Units that were owed.</ResponseField>
+<ResponseField name="status" type="string">Always `RESOLVED` on a successful response.</ResponseField>
+<ResponseField name="resolvedAt" type="string">ISO 8601 resolution timestamp.</ResponseField>
+
+```bash
+curl -X POST "https://your-domain.com/api/stock/debts/debt_abc123/resolve" \
+  -H "Cookie: sb-access-token=<token>"
+```
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `400` | Debt is already in `RESOLVED` status. |
+| `404` | Debt record not found. |
+| `401` | Not authenticated. |
+| `403` | Insufficient permission (`stock:write` required). |
+| `500` | Internal server error. |
+
+---
+
+## GET /api/catalog
+
+Returns active material catalog entries. The catalog is the source of truth for all material codes used in stock entries and transfers. Each entry defines whether a material requires serial tracking (`requiresSerial`) and optionally how many months after installation it expires (`expirationMonths`).
+
+**Required permission:** `stock:read`
+
+<ParamField query="clientId" type="string">
+  Filter catalog entries to a specific client. Returns all active entries when omitted.
+</ParamField>
+
+<ResponseField name="id" type="string">Catalog entry ID.</ResponseField>
+<ResponseField name="code" type="string">Unique material code (used as the key for stock entries).</ResponseField>
+<ResponseField name="nombre" type="string">Material display name.</ResponseField>
+<ResponseField name="descripcion" type="string">Optional description (nullable).</ResponseField>
+<ResponseField name="type" type="string">`CONSUMABLE` or `SPARE_PART`.</ResponseField>
+<ResponseField name="requiresSerial" type="boolean">Whether each unit must have a unique serial number.</ResponseField>
+<ResponseField name="expirationMonths" type="number">Months until expiration after installation (nullable).</ResponseField>
+<ResponseField name="active" type="boolean">Whether this catalog entry is active.</ResponseField>
+<ResponseField name="clientId" type="string">Owning client ID (nullable for shared catalog items).</ResponseField>
+<ResponseField name="client" type="object">
+  <Expandable title="client fields">
+    <ResponseField name="nombre" type="string">Client display name.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+```bash
+curl -X GET "https://your-domain.com/api/catalog?clientId=client_abc" \
+  -H "Cookie: sb-access-token=<token>"
+```
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `401` | Not authenticated. |
+| `403` | Insufficient permission (`stock:read` required). |
+| `500` | Internal server error. |

@@ -1,0 +1,193 @@
+---
+title: "Data Hierarchy: Client, Plant, Sector, Location, Dispenser"
+sidebarTitle: "Hierarchy"
+description: "HDB Service organizes all data around a five-level hierarchy: Client → Plant → Sector → Location → Dispenser. Learn how each level relates and scopes data access."
+---
+
+Every record in HDB Service — dispensers, tickets, stock entries, maintenance schedules, and users — lives within a strict five-level hierarchy: **Client → Plant → Sector → Location → Dispenser**. This hierarchy exists to model real-world installations accurately (a company may run dozens of factories, each with distinct operational zones) and to enforce data isolation automatically: users always operate within the scope of their Client and, when relevant, their assigned Plants.
+
+---
+
+## The five levels
+
+### Client
+
+A Client represents an **organization or company** that contracts HDB Service for water dispenser fleet management. It is the top-level ownership boundary — every plant, dispenser, user, and SLA configuration belongs to exactly one Client.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `id` | `String` (cuid) | Primary key |
+| `nombre` | `String` | Company name |
+| `email` | `String?` | Contact email |
+| `telefono` | `String?` | Contact phone |
+| `direccion` | `String?` | Physical address |
+| `active` | `Boolean` | Soft-delete flag |
+
+**Relationships downward:** A Client owns many `Plant`s and optionally has one `SlaConfig` that overrides platform defaults for all its tickets.
+
+---
+
+### Plant
+
+A Plant represents a **physical facility or site** belonging to a Client — a factory, office building, warehouse, or distribution centre. Each Plant is geo-tagged and can hold its own inventory stock.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `id` | `String` (cuid) | Primary key |
+| `clientId` | `String` | Foreign key → `Client` |
+| `nombre` | `String` | Facility name |
+| `direccion` | `String?` | Address |
+| `lat` / `lng` | `Float?` | GPS coordinates |
+| `active` | `Boolean` | Soft-delete flag |
+
+**Relationships:** A Plant belongs to one Client, contains many `Sector`s (via `PlantSector` junction), many `Location`s, and has its own `StockEntry` records. The `UserPlantAccess` join table grants `CLIENT_REQUESTER` users access to specific Plants.
+
+---
+
+### Sector
+
+A Sector represents a **functional or physical zone** within a Plant — for example, *Production*, *Office*, or *Warehouse*. Sectors are defined globally and can be reused across multiple Plants through the `PlantSector` junction table.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `id` | `String` (cuid) | Primary key |
+| `nombre` | `String` | Sector name |
+| `descripcion` | `String?` | Optional description |
+| `active` | `Boolean` | Soft-delete flag |
+
+**Relationships:** A Sector is attached to one or more Plants via `PlantSector`, and contains many `Location`s. Because Sectors are reused across Plants, the Plant–Sector relationship is many-to-many.
+
+---
+
+### Location
+
+A Location is a **specific physical spot** within a Plant and Sector where a dispenser can be installed — a corridor, break room, or production line station. Each Location has a globally unique, user-defined ID that typically mirrors a physical label or QR code.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `id` | `String` | **User-defined**, globally unique |
+| `plantId` | `String` | Foreign key → `Plant` |
+| `sectorId` | `String?` | Optional FK → `Sector` |
+| `nombre` | `String` | Display name |
+| `piso` | `String?` | Floor |
+| `area` | `String?` | Area within the sector |
+| `descripcion` | `String?` | Free-text notes |
+| `active` | `Boolean` | Soft-delete flag |
+
+**Relationships:** A Location belongs to one Plant (and optionally one Sector). Application logic enforces that at most **one active Dispenser** occupies a Location at any time. Location IDs are also used as QR code anchors for quick ticket creation.
+
+---
+
+### Dispenser
+
+A Dispenser is the **core physical asset** being managed — a water dispenser unit identified by a user-defined, globally unique ID (often matching the unit's serial label). Dispensers carry full lifecycle, repair, consumable, and spare-parts history.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `id` | `String` | **User-defined**, globally unique |
+| `marca` | `String` | Brand |
+| `modelo` | `String` | Model |
+| `status` | `DispenserStatus` | Current operational state |
+| `locationId` | `String?` | Current location (nullable) |
+| `plantId` | `String?` | Home plant |
+| `clientId` | `String?` | Owning client |
+| `lifecycleMonths` | `Int` | Expected service lifetime (default 60) |
+| `lifecycleStartDate` | `DateTime?` | When active lifecycle began |
+| `lifecyclePausedAt` | `DateTime?` | Set when status → `BACKUP` |
+| `lifecycleAccumulatedPauseDays` | `Int` | Total days paused over lifetime |
+| `numeroSerie` | `String?` | Manufacturer serial number |
+| `fechaCompra` | `DateTime?` | Purchase date |
+
+**Relationships:** A Dispenser sits in one Location (or none), belongs to one Plant and Client, and aggregates history tables for location assignments, repairs, consumable installs, and spare-part replacements.
+
+---
+
+## Hierarchy in practice
+
+Consider **AquaCorp S.A.**, a manufacturing company using HDB Service across two facilities:
+
+<Steps>
+  <Step title="Client: AquaCorp S.A.">
+    The top-level entity. All plants, users, and the client-specific SLA configuration live here.
+  </Step>
+  <Step title="Plants: North Factory & South Office">
+    Two physical sites registered under the AquaCorp client. Each has its own GPS coordinates, stock, and user access list.
+  </Step>
+  <Step title="Sectors per Plant">
+    - **North Factory** → *Production* sector, *Warehouse* sector  
+    - **South Office** → *Office Floor 1* sector, *Office Floor 2* sector  
+
+    Sectors are linked to each plant via the `PlantSector` junction table.
+  </Step>
+  <Step title="Locations per Sector">
+    - *Production* → `LOC-NF-001` (Assembly Line A), `LOC-NF-002` (Assembly Line B)  
+    - *Warehouse* → `LOC-NF-010` (Loading Bay)  
+    - *Office Floor 1* → `LOC-SO-001` (Reception), `LOC-SO-002` (Meeting Room)
+  </Step>
+  <Step title="Dispensers at Locations">
+    Each active Location holds at most one Dispenser:  
+    - `DISP-0042` (IN_SERVICE) → `LOC-NF-001`  
+    - `DISP-0043` (IN_SERVICE) → `LOC-NF-002`  
+    - `DISP-0099` (BACKUP) → *no location assigned* — held in reserve at North Factory
+  </Step>
+</Steps>
+
+---
+
+## Dispenser lifecycle states
+
+The `DispenserStatus` enum controls where a dispenser appears in operations, maintenance scheduling, and reporting.
+
+<CardGroup cols={2}>
+  <Card title="IN_SERVICE" icon="circle-check">
+    The dispenser is **actively deployed** at a location and available for normal operation. Tickets, maintenance schedules, and SLA tracking are fully active.
+  </Card>
+  <Card title="UNDER_REPAIR" icon="wrench">
+    The dispenser has been **removed from service for repairs**. It may not have a location assigned while in this state.
+  </Card>
+  <Card title="OUT_OF_SERVICE" icon="circle-xmark">
+    The dispenser is **permanently or temporarily decommissioned**. It is excluded from active fleet reporting.
+  </Card>
+  <Card title="BLOCKED" icon="lock">
+    The dispenser has been **blocked and requires an OC (Order of Correction) release** from a `CLIENT_RESPONSIBLE` user before it can return to service. The `blockedReason` and `blockedAt` fields are populated.
+  </Card>
+  <Card title="BACKUP" icon="box-archive">
+    The dispenser is a **reserve unit held in stock**. Its lifecycle timer is **paused** — time spent in this state does not count toward the unit's service lifetime. Accumulated pause time is tracked in `lifecycleAccumulatedPauseDays`.
+  </Card>
+  <Card title="IN_TECHNICAL_SERVICE" icon="screwdriver-wrench">
+    The dispenser is with **technical service staff** — deeper diagnostic or refurbishment work beyond a standard repair.
+  </Card>
+  <Card title="BLOCKED_WAITING_OC" icon="hourglass-half">
+    A transitional blocked state indicating that an **OC document is pending review**. The unit remains offline until the OC is processed.
+  </Card>
+</CardGroup>
+
+---
+
+## Data scoping
+
+Every user in HDB Service is scoped to their data automatically — no route handler needs to manually filter by client or plant. This is achieved through two complementary mechanisms:
+
+- **`clientId` on users** — `CLIENT_RESPONSIBLE` and `CLIENT_REQUESTER` users have a `clientId` field linking them to their organization.
+- **`UserPlantAccess` join table** — `CLIENT_REQUESTER` users are granted access to a specific subset of Plants within their Client.
+
+At every API route, `getDataFilter()` from `lib/auth.ts` is called with the current `SessionUser` and returns the appropriate Prisma `WHERE` clause:
+
+```typescript
+// ADMIN / SUPERVISOR — no filter, see everything
+getDataFilter(user)  // returns {}
+
+// CLIENT_RESPONSIBLE — filtered to their client
+getDataFilter(user, { clientIdField: 'clientId' })
+// returns { clientId: user.clientId }
+
+// CLIENT_REQUESTER — filtered to their assigned plants
+getDataFilter(user, { plantIdField: 'plantId' })
+// returns { plantId: { in: user.plantIds } }
+```
+
+This ensures that cross-client data leakage is structurally impossible at the database query layer.
+
+<Note>
+  A Dispenser can be in `BACKUP` status **without a Location** — `locationId` is nullable for this reason. While in `BACKUP`, the dispenser's lifecycle clock is paused: `lifecyclePausedAt` records when it entered backup, and `lifecycleAccumulatedPauseDays` accumulates the total number of days spent in reserve over the unit's lifetime.
+</Note>

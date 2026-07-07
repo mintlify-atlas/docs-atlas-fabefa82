@@ -1,0 +1,145 @@
+---
+title: "Environment Variables Reference for HDB Service"
+sidebarTitle: "Environment"
+description: "Complete reference for all environment variables required to run HDB Service — database, auth, push notifications, and application settings."
+---
+
+HDB Service is configured entirely via environment variables. All supported variables are documented in `.env.example` at the root of the repository — copy it to get started locally, then fill in the real values for each deployment target.
+
+<Steps>
+  <Step title="Copy the example file">
+    ```bash
+    cp .env.example .env.local
+    ```
+  </Step>
+  <Step title="Fill in each variable">
+    Edit `.env.local` and replace every placeholder with a real value. The sections below describe what each variable does and how to obtain it.
+  </Step>
+</Steps>
+
+<Warning>
+  Never commit `.env.local` to source control. The `.gitignore` already excludes it, but double-check before pushing — especially after adding new variables manually.
+</Warning>
+
+<Tip>
+  Generate strong secrets with `openssl rand -base64 32` on Unix systems. This produces a cryptographically random 32-byte value encoded as a Base64 string, suitable for `NEXTAUTH_SECRET` and `CRON_SECRET`.
+</Tip>
+
+---
+
+## Database
+
+HDB Service uses **PostgreSQL** (hosted on Supabase) with Prisma as the ORM. Supabase exposes two connection strings: a pooled one for runtime queries and a direct one for schema migrations.
+
+<ParamField path="DATABASE_URL" type="string" required>
+  PostgreSQL connection string used by the application at runtime. Must include `sslmode=require` for Supabase.
+
+  ```
+  postgresql://usuario:password@host:5432/hdb_service?sslmode=require
+  ```
+
+  Supabase recommends using the **pooled** (PgBouncer) connection string here so that serverless functions do not exhaust the database connection limit.
+</ParamField>
+
+<ParamField path="DIRECT_URL" type="string" required>
+  Non-pooled, direct connection string used exclusively by Prisma for schema migrations (`prisma migrate deploy`). This is required because PgBouncer does not support the advisory locks that Prisma's migration engine relies on.
+
+  ```
+  postgresql://usuario:password@direct-host:5432/hdb_service?sslmode=require
+  ```
+
+  In `prisma/schema.prisma`, this variable is wired up via the `directUrl` field of the `datasource` block.
+</ParamField>
+
+---
+
+## Authentication
+
+HDB Service uses **NextAuth.js** for session management and authentication. Both variables below must be set before the application will start.
+
+<ParamField path="NEXTAUTH_URL" type="string" required>
+  The canonical, publicly accessible URL of your deployment. NextAuth.js uses this to build redirect URLs and callback endpoints correctly.
+
+  ```
+  https://hdb.example.com
+  ```
+
+  For local development, use `http://localhost:3000`.
+</ParamField>
+
+<ParamField path="NEXTAUTH_SECRET" type="string" required>
+  A random string of at least 32 characters used to sign and encrypt session tokens and JWTs. Changing this value will immediately invalidate all existing sessions.
+
+  ```
+  generate-a-random-secret-here-min-32-chars
+  ```
+
+  Generate one with:
+  ```bash
+  openssl rand -base64 32
+  ```
+</ParamField>
+
+---
+
+## Push Notifications (OneSignal)
+
+HDB Service sends real-time push notifications to technicians and supervisors through **OneSignal**. Both variables must be set for push delivery to work; if either is missing, push calls will silently fail.
+
+<ParamField path="ONESIGNAL_APP_ID" type="string" required>
+  Your OneSignal **Application ID**. Found in the OneSignal dashboard under **Settings → Keys & IDs**.
+
+  ```
+  your-onesignal-app-id
+  ```
+</ParamField>
+
+<ParamField path="ONESIGNAL_API_KEY" type="string" required>
+  Your OneSignal **REST API Key**. Used server-side to authenticate requests to the OneSignal Notifications API. Keep this value secret — it grants full access to send and manage notifications on your app.
+
+  ```
+  your-onesignal-rest-api-key
+  ```
+</ParamField>
+
+---
+
+## Application
+
+<ParamField path="APP_URL" type="string" required>
+  The base URL of the application. Used when constructing absolute links inside email notifications (e.g., a "View Ticket" button that links back to the app).
+
+  ```
+  http://localhost:3000
+  ```
+
+  In production this should match `NEXTAUTH_URL`.
+</ParamField>
+
+---
+
+## Cron Security
+
+<ParamField path="CRON_SECRET" type="string" required>
+  A secret Bearer token that must be supplied in the `Authorization` header by any caller of the `/api/cron` endpoint — including Vercel's automated cron runner and any manual test invocations.
+
+  ```
+  generate-a-secure-random-string-for-cron-auth
+  ```
+
+  The endpoint checks this value as follows:
+
+  ```typescript
+  const authHeader = req.headers.get('authorization');
+  if (process.env.CRON_SECRET && authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+    return new NextResponse('Unauthorized', { status: 401 });
+  }
+  ```
+
+  Generate a strong value with:
+  ```bash
+  openssl rand -base64 32
+  ```
+
+  Then configure the same secret in the Vercel project settings under **Environment Variables** so Vercel can inject it when invoking the cron automatically.
+</ParamField>

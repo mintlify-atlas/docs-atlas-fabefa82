@@ -1,0 +1,143 @@
+{
+  "projectType": "saas",
+  "projectName": "HDB Service",
+  "projectDescription": "A full-stack field service management platform for water dispenser fleets — handling ticketing, preventive maintenance, inventory, SLA enforcement, and multi-role access across clients, plants, and locations.",
+  "theme": "luma",
+  "primaryColor": "#0c8394",
+  "lightColor": "#c9e3e8",
+  "darkColor": "#68b1be",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "deployment"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/hierarchy",
+              "concepts/roles-permissions",
+              "concepts/sla"
+            ]
+          },
+          {
+            "group": "Features",
+            "pages": [
+              "features/dispensers",
+              "features/tickets",
+              "features/maintenance",
+              "features/inventory",
+              "features/dashboard",
+              "features/notifications"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/environment",
+              "configuration/cron-jobs",
+              "configuration/email-templates"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "api/overview",
+              "api/authentication"
+            ]
+          },
+          {
+            "group": "Endpoints",
+            "pages": [
+              "api/dispensers",
+              "api/tickets",
+              "api/maintenance",
+              "api/inventory",
+              "api/clients-plants",
+              "api/users",
+              "api/dashboard"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Multi-tenant hierarchy: Client → Plant → Sector → Location → Dispenser",
+    "Role-based access control (ADMIN, SUPERVISOR, TECHNICIAN, CLIENT_RESPONSIBLE, CLIENT_REQUESTER)",
+    "SLA enforcement with configurable response and resolution deadlines per priority",
+    "Ticketing system with push notifications (OneSignal) and email alerts",
+    "Preventive maintenance scheduling with digital checklists and approval signatures",
+    "Inventory management with inter-plant stock transfers and debt tracking",
+    "QR code generation and scanning for dispenser identification",
+    "Dispenser lifecycle tracking with repair, consumable, and spare-part history",
+    "Analytics dashboard with MTTR, SLA compliance, and operational metrics",
+    "Automated cron jobs for SLA breach detection and maintenance schedule generation",
+    "Audit log for all mutations across entities",
+    "Progressive Web App (PWA) support with offline capability"
+  ],
+  "publicApiSurface": [
+    "GET /api/dispensers — list dispensers with filters (status, search)",
+    "POST /api/dispensers — create dispenser",
+    "GET /api/dispensers/[id] — get dispenser detail",
+    "PATCH /api/dispensers/[id] — update dispenser",
+    "POST /api/dispensers/[id]/assign — assign dispenser to location",
+    "PATCH /api/dispensers/[id]/status — change dispenser status",
+    "POST /api/dispensers/[id]/set-repair — mark for repair",
+    "POST /api/dispensers/[id]/consumables/init — initialize consumables",
+    "GET /api/tickets — list tickets with filters (status, priority, slaStatus, page, limit)",
+    "POST /api/tickets — create ticket",
+    "GET /api/tickets/[id] — get ticket detail",
+    "PATCH /api/tickets/[id] — update ticket",
+    "POST /api/tickets/[id]/repair — link repair to ticket",
+    "POST /api/tickets/[id]/comments — add comment",
+    "GET /api/maintenance — list maintenance schedules",
+    "POST /api/maintenance/generate — generate monthly schedules",
+    "POST /api/maintenance/[id]/checklist — submit checklist",
+    "POST /api/maintenance/[id]/complete — mark maintenance complete",
+    "GET /api/maintenance/approvals — list digital approvals",
+    "POST /api/maintenance/approvals/[id]/verify — verify approval signature",
+    "GET /api/stock — list stock entries (clientId, plantId, itemType, lowStockOnly)",
+    "POST /api/stock — create/increment stock entry",
+    "POST /api/stock/[id]/adjust — adjust stock quantity",
+    "POST /api/stock/transfer — transfer stock between plants",
+    "GET /api/stock/available — get available stock",
+    "GET /api/stock/debts — list inter-plant debts",
+    "POST /api/stock/debts/[id]/resolve — resolve a debt",
+    "GET /api/clients — list clients",
+    "POST /api/clients — create client",
+    "GET /api/clients/[id] — get/update/delete client",
+    "GET /api/plants — list plants",
+    "POST /api/plants — create plant",
+    "GET /api/locations — list locations",
+    "POST /api/locations — create location",
+    "GET /api/sectors — list sectors",
+    "GET /api/users — list users",
+    "POST /api/users — create user",
+    "GET /api/dashboard — dashboard summary stats",
+    "GET /api/dashboard/analytics — analytics data",
+    "GET /api/dashboard/performance — performance metrics",
+    "GET /api/dashboard/salud — fleet health overview",
+    "GET /api/dashboard/pdf — generate PDF report",
+    "GET /api/auth/me — current user session",
+    "POST /api/auth/change-password — change password",
+    "GET /api/cron — run consolidated daily cron tasks",
+    "GET /api/health — health check",
+    "GET /api/notifications — list notifications",
+    "GET /api/catalog — list material catalog",
+    "GET /api/settings — system settings",
+    "GET /api/email-templates — list email templates"
+  ]
+}

@@ -1,0 +1,178 @@
+---
+title: "Ticketing System: Incidents, SLA, and Notifications"
+sidebarTitle: "Tickets"
+description: "Log service incidents against dispensers or locations, assign technicians, track SLA compliance, and receive push and email notifications at every status change."
+---
+
+The ticketing system is the primary channel for reporting and resolving service incidents across the water dispenser fleet. Any authenticated user — from an on-floor `CLIENT_REQUESTER` to an `ADMIN` — can open a ticket against a dispenser or a location. From the moment a ticket is created, HDB Service automatically calculates SLA deadlines, routes push and email notifications, and maintains a full audit trail of every status transition and comment.
+
+## Creating a ticket
+
+Tickets are created via `POST /api/tickets`. The minimum required field is `reason`; all other fields are optional or auto-resolved.
+
+```json
+// POST /api/tickets
+{
+  "dispenserId": "DISP-A058",
+  "reason": "Dispenser no enfría correctamente",
+  "description": "El agua sale a temperatura ambiente incluso en la configuración máxima de frío.",
+  "priority": "HIGH",
+  "wantsPushNotifications": false,
+  "wantsEmailNotifications": true
+}
+```
+
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `dispenserId` | No | — | ID of the affected dispenser. |
+| `locationId` | No | Auto-resolved | If omitted but `dispenserId` is provided, the location is automatically resolved from the dispenser's current `locationId`. |
+| `reason` | **Yes** | — | Short description of the incident. |
+| `description` | No | `null` | Optional detailed explanation. |
+| `priority` | No | `MEDIUM` | `LOW`, `MEDIUM`, `HIGH`, or `CRITICAL`. |
+| `wantsPushNotifications` | No | `false` | If `true`, the requester opts into push notifications for updates on this ticket. |
+| `wantsEmailNotifications` | No | `false` | If `true`, the requester opts into email notifications for updates on this ticket. |
+
+**SLA deadline auto-calculation** — immediately on creation, the system looks up the `SlaConfig` record for the client associated with the resolved location. Using that configuration (or system-wide defaults if none is found), it calculates and stores both `slaResponseDeadline` and `slaResolutionDeadline` on the ticket.
+
+Default SLA times (in minutes):
+
+| Priority | Response | Resolution |
+|---|---|---|
+| `LOW` | 480 min (8 h) | 4 320 min (72 h) |
+| `MEDIUM` | 240 min (4 h) | 1 440 min (24 h) |
+| `HIGH` | 120 min (2 h) | 480 min (8 h) |
+| `CRITICAL` | 60 min (1 h) | 240 min (4 h) |
+
+<Note>
+  SLA deadlines are fixed at creation time based on the client's configuration at that moment. Changing `SlaConfig` later does not retroactively affect open tickets.
+</Note>
+
+---
+
+## Ticket statuses
+
+Every ticket moves through a defined lifecycle. Each transition is recorded in `TicketStatusHistory` with the `fromStatus`, `toStatus`, the name of the user who made the change (`changedBy`), a timestamp (`changedAt`), and an optional `notes` string.
+
+<CardGroup cols={2}>
+  <Card title="OPEN" icon="envelope-open">
+    The ticket has been created and is awaiting acknowledgement. This is the initial state for all new tickets. The SLA response clock is ticking.
+  </Card>
+  <Card title="IN_PROGRESS" icon="spinner">
+    A technician has begun working on the ticket. The first transition to `IN_PROGRESS` records `respondedAt` and checks whether `slaResponseDeadline` was already breached.
+  </Card>
+  <Card title="RESOLVED" icon="circle-check">
+    The technician has fixed the issue. `resolvedAt` is recorded and `slaResolutionBreached` is evaluated. An email is sent to the requester upon resolution.
+  </Card>
+  <Card title="CLOSED" icon="box-archive">
+    The ticket has been formally closed by an ADMIN or SUPERVISOR. If closed without first reaching `RESOLVED`, push and in-app notifications are sent to the original reporter and all supervisors.
+  </Card>
+</CardGroup>
+
+A full status history is returned in the `statusHistory` array on `GET /api/tickets/[id]`, ordered chronologically.
+
+---
+
+## Priority and SLA
+
+Priority is set at ticket creation and can be updated via `PUT /api/tickets/[id]` by users with `tickets:write`. It determines both the urgency display in the UI and the SLA deadline windows.
+
+The `slaStatus` query parameter on `GET /api/tickets` allows filtering by breach state:
+
+| `slaStatus` value | Behaviour |
+|---|---|
+| `BREACHED` | Returns tickets where `slaResolutionBreached = true`. |
+| `NEAR_BREACH` | Returns open/in-progress tickets whose `slaResolutionDeadline` falls within the next 2 hours and have not yet been breached. |
+| *(omitted)* | No SLA filter applied. |
+
+Two boolean flags are persisted on the ticket record:
+
+- **`slaResponseBreached`** — set to `true` when the ticket transitions to `IN_PROGRESS` after its `slaResponseDeadline` has passed.
+- **`slaResolutionBreached`** — set to `true` when the ticket transitions to `RESOLVED` or `CLOSED` after its `slaResolutionDeadline` has passed.
+
+<Warning>
+  Once `slaResponseBreached` or `slaResolutionBreached` is set to `true`, it is never reset — even if the ticket is later re-opened or its priority is changed.
+</Warning>
+
+---
+
+## Assignment
+
+Tickets are assigned to a single `TECHNICIAN`-role user via the `assignedToId` field. Assignment can be set or changed by users holding the `tickets:assign` permission.
+
+```json
+// PUT /api/tickets/:id  — assign a technician
+{
+  "assignedToId": "user_tech_xyz"
+}
+```
+
+When a ticket is assigned:
+
+1. A **push notification** is sent to the technician via OneSignal (if they have a registered `onesignalPlayerId`).
+2. An **in-app notification** is created in the `Notification` table for the technician.
+3. An **email** is sent to the technician using the `TICKET_ASSIGNED` template, including priority and SLA deadline.
+
+<Note>
+  TECHNICIAN users can **only see** tickets that are directly assigned to them (`assignedToId = user.id`). Technicians also cannot update the `assignedToId` field — that requires `tickets:assign`.
+</Note>
+
+Technicians also have an IDOR guard on `PUT /api/tickets/[id]`: if a technician attempts to update a ticket that is not assigned to them, the API returns `403 Forbidden`.
+
+---
+
+## Comments
+
+Any user with `tickets:read` access can add a comment to a ticket. Comments are stored in `TicketComment` and are returned as part of the `GET /api/tickets/[id]` response, ordered by `createdAt` ascending.
+
+```typescript
+// TicketComment fields
+{
+  id:        string,
+  ticketId:  string,
+  userId:    string,    // author
+  user: {
+    nombre:   string,
+    apellido: string,
+    role:     UserRole
+  },
+  message:   string,   // full text
+  createdAt: DateTime
+}
+```
+
+Comments are immutable once created — there is no `PUT` or `DELETE` endpoint for individual comments. This preserves the integrity of the audit trail.
+
+---
+
+## Notifications on ticket creation
+
+When a ticket is created, HDB Service fires notifications on three channels simultaneously:
+
+<Steps>
+  <Step title="In-app notifications">
+    A `Notification` record is created in the database for every active `ADMIN` and `SUPERVISOR` user. These appear in the bell icon notification panel in the UI.
+  </Step>
+  <Step title="OneSignal push notifications">
+    All `ADMIN` and `SUPERVISOR` users who have a registered `onesignalPlayerId` receive a push notification with the ticket priority and the first 100 characters of the reason.
+  </Step>
+  <Step title="Email notification">
+    An email is sent using the `TICKET_CREATED` template. The email includes the ticket ID, reason, priority, plant name, and location.
+  </Step>
+</Steps>
+
+If the requester set `wantsEmailNotifications: true`, they will additionally receive an email when the ticket status changes to `RESOLVED` (using the `TICKET_RESOLVED` template).
+
+<Tip>
+  Notification delivery for push and email is performed asynchronously and does not block the `POST /api/tickets` response. A failure in notification delivery does not cause the ticket creation to fail.
+</Tip>
+
+---
+
+## Required permissions
+
+| Permission | Roles |
+|---|---|
+| `tickets:read` | ADMIN, SUPERVISOR, TECHNICIAN, CLIENT_RESPONSIBLE, CLIENT_REQUESTER |
+| `tickets:write` | ADMIN, SUPERVISOR, TECHNICIAN, CLIENT_RESPONSIBLE, CLIENT_REQUESTER |
+| `tickets:assign` | ADMIN, SUPERVISOR |
+| `tickets:close` | ADMIN, SUPERVISOR |

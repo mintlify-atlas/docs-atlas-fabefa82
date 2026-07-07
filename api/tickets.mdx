@@ -1,0 +1,598 @@
+---
+title: "Ticket API Endpoints — Create, Assign, and Resolve"
+sidebarTitle: "Tickets"
+description: "REST API reference for the ticketing system: list with SLA filtering, create, update status, assign technicians, add comments, and link repair records."
+---
+
+The Ticket API powers the end-to-end support workflow for water dispenser incidents. Tickets are created by any authenticated user who spots a problem, automatically assigned SLA deadlines based on the client's configuration, and then routed through a `OPEN → IN_PROGRESS → RESOLVED → CLOSED` lifecycle. The system emits push notifications (via OneSignal) and emails at key transition points.
+
+Data-scope filtering is applied automatically per role: technicians see only tickets assigned to them; `CLIENT_REQUESTER` users see tickets from their plants plus any ticket they personally reported; higher roles see all tickets within their data scope.
+
+---
+
+## GET /api/tickets
+
+Returns a paginated list of tickets matching the supplied filters, ordered by `priority` (descending) then `createdAt` (descending).
+
+**Required permission:** `tickets:read`
+
+### Query parameters
+
+<ParamField query="status" type="TicketStatus">
+  Filter by status. Accepted values: `OPEN`, `IN_PROGRESS`, `RESOLVED`, `CLOSED`.
+</ParamField>
+
+<ParamField query="priority" type="TicketPriority">
+  Filter by priority. Accepted values: `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`.
+</ParamField>
+
+<ParamField query="assignedToId" type="string">
+  Filter tickets assigned to a specific user ID.
+</ParamField>
+
+<ParamField query="dispenserId" type="string">
+  Filter tickets linked to a specific dispenser ID.
+</ParamField>
+
+<ParamField query="slaStatus" type="string">
+  SLA health filter. Accepted values:
+  - `BREACHED` — `slaResolutionBreached` is `true`.
+  - `NEAR_BREACH` — resolution deadline is within the next 2 hours and the ticket is not closed.
+  - `ON_TIME` — no SLA filter (returns all SLA-healthy tickets).
+</ParamField>
+
+<ParamField query="page" type="number">
+  Page number (1-indexed). Defaults to `1`.
+</ParamField>
+
+<ParamField query="limit" type="number">
+  Results per page. Defaults to `50`.
+</ParamField>
+
+### Response fields
+
+<ResponseField name="tickets" type="Ticket[]">
+  Array of ticket objects. Each ticket includes a nested `dispenser` (id, marca, modelo, status), `location` (with plant and client name), `reportedBy` (nombre, role), `assignedTo` (nombre), and a `_count.comments` integer.
+</ResponseField>
+
+<ResponseField name="total" type="number">
+  Total number of matching tickets across all pages.
+</ResponseField>
+
+<ResponseField name="page" type="number">
+  Current page number, echoed from the request.
+</ResponseField>
+
+<ResponseField name="limit" type="number">
+  Page size, echoed from the request.
+</ResponseField>
+
+### Example
+
+```bash
+curl -X GET "https://your-domain.com/api/tickets?status=OPEN&priority=HIGH&page=1&limit=20" \
+  -H "Cookie: sb-access-token=<token>"
+```
+
+```json
+{
+  "tickets": [
+    {
+      "id": "clx1a2b3c4d5e",
+      "reason": "No dispensa agua fría",
+      "priority": "HIGH",
+      "status": "OPEN",
+      "slaResolutionDeadline": "2024-06-01T18:00:00.000Z",
+      "slaResolutionBreached": false,
+      "dispenser": { "id": "DISP-042", "marca": "Acuaservice", "modelo": "Pro 600", "status": "IN_SERVICE" },
+      "location": { "nombre": "Comedor", "plant": { "nombre": "Planta Norte", "client": { "nombre": "Empresa SA" } } },
+      "reportedBy": { "nombre": "Ana García", "role": "CLIENT_REQUESTER" },
+      "assignedTo": null,
+      "_count": { "comments": 0 }
+    }
+  ],
+  "total": 1,
+  "page": 1,
+  "limit": 20
+}
+```
+
+### Error cases
+
+| Status | Description |
+|--------|-------------|
+| `401`  | Missing or invalid authentication session. |
+| `403`  | Caller lacks `tickets:read`. |
+
+---
+
+## POST /api/tickets
+
+Creates a new support ticket. SLA response and resolution deadlines are automatically calculated from the client's `SlaConfig` based on the resolved location and requested priority. Supervisors and admins receive an in-app notification and a push notification (OneSignal) immediately after creation.
+
+Supports idempotency via an `Idempotency-Key` request header.
+
+**Required permission:** `tickets:write`
+
+### Request body
+
+<ParamField body="reason" type="string" required>
+  Short description of the problem (displayed as the ticket title).
+</ParamField>
+
+<ParamField body="dispenserId" type="string">
+  ID of the affected dispenser. If `locationId` is not provided, the dispenser's current location is used automatically.
+</ParamField>
+
+<ParamField body="locationId" type="string">
+  ID of the affected location. Overrides automatic location resolution from `dispenserId`.
+</ParamField>
+
+<ParamField body="description" type="string">
+  Extended description of the issue.
+</ParamField>
+
+<ParamField body="priority" type="TicketPriority">
+  Ticket priority. Accepted values: `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`. Defaults to `MEDIUM`.
+</ParamField>
+
+<ParamField body="wantsPushNotifications" type="boolean">
+  If `true`, the reporter opts in to push notifications for status updates on this ticket.
+</ParamField>
+
+<ParamField body="wantsEmailNotifications" type="boolean">
+  If `true`, the reporter opts in to email notifications for status updates on this ticket.
+</ParamField>
+
+### Response fields
+
+<ResponseField name="id" type="string">
+  Generated ticket ID (CUID).
+</ResponseField>
+
+<ResponseField name="reason" type="string">
+  Ticket reason as submitted.
+</ResponseField>
+
+<ResponseField name="priority" type="TicketPriority">
+  Resolved priority.
+</ResponseField>
+
+<ResponseField name="status" type="string">
+  Always `OPEN` on creation.
+</ResponseField>
+
+<ResponseField name="slaResponseDeadline" type="string | null">
+  ISO 8601 response deadline derived from the client's SLA config.
+</ResponseField>
+
+<ResponseField name="slaResolutionDeadline" type="string | null">
+  ISO 8601 resolution deadline derived from the client's SLA config.
+</ResponseField>
+
+<ResponseField name="dispenser" type="object">
+  Nested dispenser object (`id`, `marca`, `modelo`) if `dispenserId` was provided.
+</ResponseField>
+
+<ResponseField name="location" type="object">
+  Nested location object with `plant.nombre` if a location was resolved.
+</ResponseField>
+
+<ResponseField name="createdAt" type="string">
+  ISO 8601 creation timestamp.
+</ResponseField>
+
+### Example
+
+```bash
+curl -X POST "https://your-domain.com/api/tickets" \
+  -H "Cookie: sb-access-token=<token>" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: ticket-disp042-20240601-001" \
+  -d '{
+    "dispenserId": "DISP-042",
+    "reason": "No dispensa agua fría",
+    "description": "El compresor parece no encender. El agua sale a temperatura ambiente.",
+    "priority": "HIGH",
+    "wantsEmailNotifications": true
+  }'
+```
+
+```json
+{
+  "id": "clx1a2b3c4d5e",
+  "reason": "No dispensa agua fría",
+  "description": "El compresor parece no encender. El agua sale a temperatura ambiente.",
+  "priority": "HIGH",
+  "status": "OPEN",
+  "slaResponseDeadline": "2024-06-01T12:00:00.000Z",
+  "slaResolutionDeadline": "2024-06-01T18:00:00.000Z",
+  "slaResponseBreached": false,
+  "slaResolutionBreached": false,
+  "wantsEmailNotifications": true,
+  "dispenser": { "id": "DISP-042", "marca": "Acuaservice", "modelo": "Pro 600" },
+  "location": { "nombre": "Comedor", "plant": { "nombre": "Planta Norte" } },
+  "createdAt": "2024-06-01T10:00:00.000Z"
+}
+```
+
+### Error cases
+
+| Status | Description |
+|--------|-------------|
+| `400`  | `reason` is missing or blank. |
+| `401`  | Missing or invalid authentication session. |
+| `403`  | Caller lacks `tickets:write`. |
+
+---
+
+## GET /api/tickets/\{id\}
+
+Retrieves a single ticket with full relational detail.
+
+**Required permission:** `tickets:read`
+
+<Note>
+  `CLIENT_REQUESTER` users can fetch any ticket they reported, even if the dispenser is outside their normal plant scope.
+</Note>
+
+### Response fields
+
+<ResponseField name="id" type="string">
+  Ticket ID.
+</ResponseField>
+
+<ResponseField name="reason" type="string">
+  Ticket title/reason.
+</ResponseField>
+
+<ResponseField name="description" type="string | null">
+  Extended description.
+</ResponseField>
+
+<ResponseField name="priority" type="TicketPriority">
+  Current priority.
+</ResponseField>
+
+<ResponseField name="status" type="TicketStatus">
+  Current status.
+</ResponseField>
+
+<ResponseField name="dispenser" type="object">
+  Nested dispenser with its current `location` (including `plant`, `client`, and `sector`).
+</ResponseField>
+
+<ResponseField name="location" type="object">
+  Direct ticket location with nested `plant`, `client`, and `sector`.
+</ResponseField>
+
+<ResponseField name="reportedBy" type="object">
+  Reporter details: `id`, `nombre`, `role`.
+</ResponseField>
+
+<ResponseField name="assignedTo" type="object | null">
+  Assigned technician: `id`, `nombre`. `null` if unassigned.
+</ResponseField>
+
+<ResponseField name="comments" type="TicketComment[]">
+  All comments ordered oldest-first, each with `user.nombre`, `user.apellido`, and `user.role`.
+</ResponseField>
+
+<ResponseField name="statusHistory" type="TicketStatusHistory[]">
+  Full status change history ordered oldest-first, including `fromStatus`, `toStatus`, `changedBy`, `changedAt`, and `notes`.
+</ResponseField>
+
+<ResponseField name="slaResponseDeadline" type="string | null">
+  SLA response deadline.
+</ResponseField>
+
+<ResponseField name="slaResolutionDeadline" type="string | null">
+  SLA resolution deadline.
+</ResponseField>
+
+<ResponseField name="slaResponseBreached" type="boolean">
+  Whether the response SLA was breached.
+</ResponseField>
+
+<ResponseField name="slaResolutionBreached" type="boolean">
+  Whether the resolution SLA was breached.
+</ResponseField>
+
+<ResponseField name="respondedAt" type="string | null">
+  Timestamp when the ticket first moved to `IN_PROGRESS`.
+</ResponseField>
+
+<ResponseField name="resolvedAt" type="string | null">
+  Timestamp when the ticket was first moved to `RESOLVED` or `CLOSED`.
+</ResponseField>
+
+### Example
+
+```bash
+curl -X GET "https://your-domain.com/api/tickets/clx1a2b3c4d5e" \
+  -H "Cookie: sb-access-token=<token>"
+```
+
+### Error cases
+
+| Status | Description |
+|--------|-------------|
+| `401`  | Missing or invalid authentication session. |
+| `403`  | Caller lacks `tickets:read` or the ticket is outside their data scope. |
+| `404`  | No ticket found with the given ID. |
+
+---
+
+## PATCH /api/tickets/\{id\}
+
+Updates a ticket's status, assignment, priority, or a combination of these. Each status change creates a `TicketStatusHistory` record. SLA timestamps are tracked automatically:
+
+- Transitioning to `IN_PROGRESS` records `respondedAt` and checks the response SLA deadline.
+- Transitioning to `RESOLVED` or `CLOSED` records `resolvedAt` and checks the resolution SLA deadline.
+- Closing a ticket that was never `RESOLVED` triggers notifications to the reporter and all supervisors.
+
+<Note>
+  This endpoint also accepts `PUT`. `PATCH` and `PUT` are equivalent.
+</Note>
+
+**Required permissions:**
+- `tickets:write` for status and priority changes.
+- `tickets:assign` to change `assignedToId`.
+- `tickets:close` to set status to `CLOSED`.
+
+<Warning>
+  Technicians can only update tickets that are assigned to them. Attempting to update an unassigned or other-assigned ticket returns `403`.
+</Warning>
+
+### Request body
+
+<ParamField body="status" type="TicketStatus">
+  New status. Accepted values: `OPEN`, `IN_PROGRESS`, `RESOLVED`, `CLOSED`.
+</ParamField>
+
+<ParamField body="assignedToId" type="string">
+  User ID of the technician to assign. Pass `null` to unassign. Triggers a push notification and email to the assigned user.
+</ParamField>
+
+<ParamField body="priority" type="TicketPriority">
+  Updated priority. Accepted values: `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`.
+</ParamField>
+
+<ParamField body="notes" type="string">
+  Optional notes to attach to the status history record (e.g. resolution summary).
+</ParamField>
+
+### Response fields
+
+<ResponseField name="id" type="string">
+  Ticket ID.
+</ResponseField>
+
+<ResponseField name="status" type="TicketStatus">
+  Updated status.
+</ResponseField>
+
+<ResponseField name="assignedToId" type="string | null">
+  Updated assignee ID.
+</ResponseField>
+
+<ResponseField name="priority" type="TicketPriority">
+  Updated priority.
+</ResponseField>
+
+<ResponseField name="respondedAt" type="string | null">
+  Set on the first `IN_PROGRESS` transition.
+</ResponseField>
+
+<ResponseField name="resolvedAt" type="string | null">
+  Set on the first `RESOLVED` or `CLOSED` transition.
+</ResponseField>
+
+<ResponseField name="slaResponseBreached" type="boolean">
+  Updated breach flag.
+</ResponseField>
+
+<ResponseField name="slaResolutionBreached" type="boolean">
+  Updated breach flag.
+</ResponseField>
+
+### Example
+
+```bash
+curl -X PATCH "https://your-domain.com/api/tickets/clx1a2b3c4d5e" \
+  -H "Cookie: sb-access-token=<token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "status": "IN_PROGRESS",
+    "assignedToId": "user-tech-007",
+    "notes": "On-site visit scheduled for this afternoon"
+  }'
+```
+
+```json
+{
+  "id": "clx1a2b3c4d5e",
+  "status": "IN_PROGRESS",
+  "assignedToId": "user-tech-007",
+  "priority": "HIGH",
+  "respondedAt": "2024-06-01T11:30:00.000Z",
+  "resolvedAt": null,
+  "slaResponseBreached": false,
+  "slaResolutionBreached": false,
+  "updatedAt": "2024-06-01T11:30:00.000Z"
+}
+```
+
+### Error cases
+
+| Status | Description |
+|--------|-------------|
+| `400`  | `status` value is not a valid `TicketStatus`. |
+| `401`  | Missing or invalid authentication session. |
+| `403`  | Caller lacks the required permission, is a technician trying to update a ticket not assigned to them, or attempting to close without `tickets:close`. |
+| `404`  | Ticket not found. |
+
+---
+
+## POST /api/tickets/\{id\}/comments
+
+Adds a comment to an existing ticket. Returns the created comment with the author's display name and role.
+
+**Required permission:** `tickets:write`
+
+### Request body
+
+<ParamField body="message" type="string" required>
+  Comment text. Cannot be blank.
+</ParamField>
+
+### Response fields
+
+<ResponseField name="id" type="string">
+  Comment ID (CUID).
+</ResponseField>
+
+<ResponseField name="ticketId" type="string">
+  Parent ticket ID.
+</ResponseField>
+
+<ResponseField name="userId" type="string">
+  Author's user ID.
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  Comment content.
+</ResponseField>
+
+<ResponseField name="createdAt" type="string">
+  ISO 8601 creation timestamp.
+</ResponseField>
+
+<ResponseField name="user" type="object">
+  Author details: `nombre`, `apellido`, `role`.
+</ResponseField>
+
+### Example
+
+```bash
+curl -X POST "https://your-domain.com/api/tickets/clx1a2b3c4d5e/comments" \
+  -H "Cookie: sb-access-token=<token>" \
+  -H "Content-Type: application/json" \
+  -d '{ "message": "Visited on-site. Compressor capacitor replaced. Testing underway." }'
+```
+
+```json
+{
+  "id": "clxcomment001",
+  "ticketId": "clx1a2b3c4d5e",
+  "userId": "user-tech-007",
+  "message": "Visited on-site. Compressor capacitor replaced. Testing underway.",
+  "createdAt": "2024-06-01T15:45:00.000Z",
+  "user": {
+    "nombre": "Carlos",
+    "apellido": "López",
+    "role": "TECHNICIAN"
+  }
+}
+```
+
+### Error cases
+
+| Status | Description |
+|--------|-------------|
+| `400`  | `message` is missing or blank. |
+| `401`  | Missing or invalid authentication session. |
+| `403`  | Caller lacks `tickets:write`. |
+
+---
+
+## POST /api/tickets/\{id\}/repair
+
+Records a completed repair against the ticket's dispenser. The operation is performed in a single database transaction that:
+
+1. Optionally processes consumables/spare parts used during the repair, decrementing live inventory and writing `DispenserConsumableHistory` entries.
+2. Creates a `DispenserRepairHistory` entry linked to the dispenser.
+3. Posts an automatic comment summarising the repair.
+4. Advances the ticket status to `RESOLVED` and records `resolvedAt`.
+
+**Required permission:** `tickets:write`
+
+<Note>
+  The ticket must have a `dispenserId`. Calling this endpoint on a ticket without an associated dispenser returns `400`.
+</Note>
+
+### Request body
+
+<ParamField body="descripcion" type="string" required>
+  Description of the problem that was repaired.
+</ParamField>
+
+<ParamField body="diagnostico" type="string">
+  Technical diagnosis or root cause.
+</ParamField>
+
+<ParamField body="consumablesUsed" type="array">
+  Consumables and spare parts consumed during the repair. Stock is deducted from the dispenser's plant inventory.
+
+  <Expandable title="consumablesUsed entry">
+    <ParamField body="materialCode" type="string" required>
+      Catalog material code. Must exist in `MaterialCatalog`.
+    </ParamField>
+    <ParamField body="nombre" type="string" required>
+      Display name for the item.
+    </ParamField>
+    <ParamField body="cantidad" type="number" required>
+      Quantity consumed (must be > 0).
+    </ParamField>
+    <ParamField body="type" type="string">
+      `"SERIALIZED"` or `"BULK"`. Serialized items require an `id` field pointing to the specific `Consumable` record.
+    </ParamField>
+    <ParamField body="id" type="string">
+      Internal `Consumable.id` — required when `type` is `"SERIALIZED"`.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Response fields
+
+<ResponseField name="success" type="boolean">
+  `true` when the repair was fully recorded and the ticket resolved.
+</ResponseField>
+
+### Example
+
+```bash
+curl -X POST "https://your-domain.com/api/tickets/clx1a2b3c4d5e/repair" \
+  -H "Cookie: sb-access-token=<token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "descripcion": "Compressor capacitor failure",
+    "diagnostico": "Electrolytic capacitor degraded due to heat cycling. Replaced unit.",
+    "consumablesUsed": [
+      {
+        "materialCode": "CAP-440V",
+        "nombre": "Capacitor 440V 30µF",
+        "cantidad": 1,
+        "type": "BULK"
+      }
+    ]
+  }'
+```
+
+```json
+{ "success": true }
+```
+
+<Warning>
+  If the dispenser's plant has insufficient stock for any listed item, the entire transaction is rolled back. No repair history, no stock deduction, no ticket update. The response body will contain a descriptive `error` string.
+</Warning>
+
+### Error cases
+
+| Status | Description |
+|--------|-------------|
+| `400`  | `descripcion` is missing, or the ticket has no associated dispenser. |
+| `401`  | Missing or invalid authentication session. |
+| `403`  | Caller lacks `tickets:write`. |
+| `404`  | Ticket not found. |
+| `500`  | Insufficient stock or unknown material code — the error message describes the specific item. |

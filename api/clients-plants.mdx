@@ -1,0 +1,672 @@
+---
+title: "Clients, Plants, Locations, and Sectors API Endpoints"
+sidebarTitle: "Clients & Plants"
+description: "REST API reference for the organizational hierarchy: manage clients, plants, sectors, and locations that structure dispenser deployments."
+---
+
+HDB Service uses a four-level organizational hierarchy: **Client → Plant → Sector → Location**. A client represents a business account. Each client has one or more plants (physical sites). Plants can be subdivided into sectors (logical zones), and each sector contains locations — the precise spots where water dispensers are installed. Locations carry a globally unique, user-defined ID that is printed on QR codes attached to each dispenser mounting point.
+
+All endpoints require an authenticated session. Access is automatically scoped by the RBAC system: `CLIENT_RESPONSIBLE` and `CLIENT_REQUESTER` roles can only read data belonging to their own client or assigned plants, and cannot create or modify records.
+
+---
+
+## GET /api/clients
+
+Returns all active clients visible to the authenticated user. `CLIENT_RESPONSIBLE` and `CLIENT_REQUESTER` users receive only their own client record. Each client object includes a `_count` summary with the number of associated plants and users.
+
+**Required permission:** `clients:read`
+
+<ResponseField name="id" type="string">Client ID.</ResponseField>
+<ResponseField name="nombre" type="string">Client display name.</ResponseField>
+<ResponseField name="email" type="string">Contact email (nullable).</ResponseField>
+<ResponseField name="telefono" type="string">Contact phone number (nullable).</ResponseField>
+<ResponseField name="direccion" type="string">Physical address (nullable).</ResponseField>
+<ResponseField name="active" type="boolean">Whether the client is active.</ResponseField>
+<ResponseField name="createdAt" type="string">ISO 8601 creation timestamp.</ResponseField>
+<ResponseField name="_count" type="object">
+  <Expandable title="_count fields">
+    <ResponseField name="plants" type="number">Number of plants belonging to this client.</ResponseField>
+    <ResponseField name="users" type="number">Number of users associated with this client.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+```bash
+curl -X GET "https://your-domain.com/api/clients" \
+  -H "Cookie: sb-access-token=<token>"
+```
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `401` | Not authenticated. |
+| `403` | Insufficient permission (`clients:read` required). |
+| `500` | Internal server error. |
+
+---
+
+## POST /api/clients
+
+Creates a new client. The `nombre` field is required; all other fields are optional. Creation is idempotent via the `Idempotency-Key` header — sending the same key twice returns the first response without creating a duplicate. The action is written to the audit log.
+
+**Required permission:** `clients:write`
+
+<ParamField body="nombre" type="string" required>
+  Client display name. Cannot be blank.
+</ParamField>
+
+<ParamField body="email" type="string">
+  Contact email address.
+</ParamField>
+
+<ParamField body="telefono" type="string">
+  Contact phone number.
+</ParamField>
+
+<ParamField body="direccion" type="string">
+  Physical address.
+</ParamField>
+
+<ResponseField name="id" type="string">Newly created client ID.</ResponseField>
+<ResponseField name="nombre" type="string">Client display name.</ResponseField>
+<ResponseField name="email" type="string">Contact email (nullable).</ResponseField>
+<ResponseField name="telefono" type="string">Contact phone (nullable).</ResponseField>
+<ResponseField name="direccion" type="string">Physical address (nullable).</ResponseField>
+<ResponseField name="active" type="boolean">Always `true` on creation.</ResponseField>
+<ResponseField name="createdAt" type="string">ISO 8601 creation timestamp.</ResponseField>
+
+```bash
+curl -X POST "https://your-domain.com/api/clients" \
+  -H "Content-Type: application/json" \
+  -H "Cookie: sb-access-token=<token>" \
+  -d '{
+    "nombre": "Acme Corporation",
+    "email": "ops@acme.com",
+    "telefono": "+54 11 4000-0000",
+    "direccion": "Av. Corrientes 1234, Buenos Aires"
+  }'
+```
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `400` | `nombre` is missing or blank. |
+| `401` | Not authenticated. |
+| `403` | Insufficient permission (`clients:write` required). |
+| `500` | Internal server error. |
+
+---
+
+## GET /api/clients/[id]
+
+Returns a single client by ID, including its active plants (each with a count of locations), the total number of associated users, and the client's SLA configuration if one exists. Returns `403` if the authenticated user does not have access to this client.
+
+**Required permission:** `clients:read`
+
+<ResponseField name="id" type="string">Client ID.</ResponseField>
+<ResponseField name="nombre" type="string">Client display name.</ResponseField>
+<ResponseField name="email" type="string">Contact email (nullable).</ResponseField>
+<ResponseField name="telefono" type="string">Contact phone (nullable).</ResponseField>
+<ResponseField name="direccion" type="string">Physical address (nullable).</ResponseField>
+<ResponseField name="active" type="boolean">Whether the client is active.</ResponseField>
+<ResponseField name="plants" type="array">
+  <Expandable title="plant fields">
+    <ResponseField name="id" type="string">Plant ID.</ResponseField>
+    <ResponseField name="nombre" type="string">Plant name.</ResponseField>
+    <ResponseField name="active" type="boolean">Whether the plant is active.</ResponseField>
+    <ResponseField name="_count" type="object">
+      <Expandable title="_count fields">
+        <ResponseField name="locations" type="number">Number of locations in this plant.</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+<ResponseField name="_count" type="object">
+  <Expandable title="_count fields">
+    <ResponseField name="users" type="number">Total users associated with this client.</ResponseField>
+  </Expandable>
+</ResponseField>
+<ResponseField name="slaConfig" type="object">SLA configuration object (nullable). See SLA Config schema for full field list.</ResponseField>
+
+```bash
+curl -X GET "https://your-domain.com/api/clients/client_abc" \
+  -H "Cookie: sb-access-token=<token>"
+```
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `403` | Authenticated user does not have access to this client. |
+| `404` | Client not found. |
+| `401` | Not authenticated. |
+| `500` | Internal server error. |
+
+---
+
+## PATCH /api/clients/[id]
+
+Updates one or more fields on an existing client. Only fields present in the request body are updated; omitted fields are left unchanged. Setting `active: false` effectively deactivates the client. All changes are recorded in the audit log.
+
+<Note>
+  The source implements this as `PUT` internally. Pass only the fields you wish to change.
+</Note>
+
+**Required permission:** `clients:write`
+
+<ParamField body="nombre" type="string">New client display name.</ParamField>
+<ParamField body="email" type="string">New contact email. Pass `null` to clear.</ParamField>
+<ParamField body="telefono" type="string">New contact phone. Pass `null` to clear.</ParamField>
+<ParamField body="direccion" type="string">New physical address. Pass `null` to clear.</ParamField>
+<ParamField body="active" type="boolean">Set to `false` to deactivate the client.</ParamField>
+
+<ResponseField name="id" type="string">Client ID.</ResponseField>
+<ResponseField name="nombre" type="string">Updated display name.</ResponseField>
+<ResponseField name="email" type="string">Updated email (nullable).</ResponseField>
+<ResponseField name="telefono" type="string">Updated phone (nullable).</ResponseField>
+<ResponseField name="direccion" type="string">Updated address (nullable).</ResponseField>
+<ResponseField name="active" type="boolean">Current active state.</ResponseField>
+<ResponseField name="updatedAt" type="string">ISO 8601 last-updated timestamp.</ResponseField>
+
+```bash
+curl -X PATCH "https://your-domain.com/api/clients/client_abc" \
+  -H "Content-Type: application/json" \
+  -H "Cookie: sb-access-token=<token>" \
+  -d '{"telefono": "+54 11 9999-0000"}'
+```
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `404` | Client not found. |
+| `401` | Not authenticated. |
+| `403` | Insufficient permission (`clients:write` required). |
+| `500` | Internal server error. |
+
+---
+
+## DELETE /api/clients/[id]
+
+Soft-deletes a client by setting `active: false`. The client record and all related data are retained in the database. The action is recorded in the audit log.
+
+**Required permission:** `clients:write`
+
+<ResponseField name="id" type="string">Client ID.</ResponseField>
+<ResponseField name="active" type="boolean">Always `false` after a successful delete.</ResponseField>
+<ResponseField name="updatedAt" type="string">ISO 8601 timestamp of deactivation.</ResponseField>
+
+```bash
+curl -X DELETE "https://your-domain.com/api/clients/client_abc" \
+  -H "Cookie: sb-access-token=<token>"
+```
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `401` | Not authenticated. |
+| `403` | Insufficient permission (`clients:write` required). |
+| `500` | Internal server error. |
+
+---
+
+## GET /api/plants
+
+Returns all active plants visible to the authenticated user. `CLIENT_RESPONSIBLE` users see only plants belonging to their client. `CLIENT_REQUESTER` users see only plants they have been explicitly granted access to via `UserPlantAccess`. Each plant includes a reference to its parent client and a count of locations.
+
+**Required permission:** `plants:read`
+
+<ParamField query="clientId" type="string">
+  Filter plants by client ID.
+</ParamField>
+
+<ResponseField name="id" type="string">Plant ID.</ResponseField>
+<ResponseField name="clientId" type="string">Owning client ID.</ResponseField>
+<ResponseField name="nombre" type="string">Plant display name.</ResponseField>
+<ResponseField name="direccion" type="string">Physical address (nullable).</ResponseField>
+<ResponseField name="lat" type="number">Latitude coordinate (nullable).</ResponseField>
+<ResponseField name="lng" type="number">Longitude coordinate (nullable).</ResponseField>
+<ResponseField name="active" type="boolean">Whether the plant is active.</ResponseField>
+<ResponseField name="createdAt" type="string">ISO 8601 creation timestamp.</ResponseField>
+<ResponseField name="client" type="object">
+  <Expandable title="client fields">
+    <ResponseField name="id" type="string">Client ID.</ResponseField>
+    <ResponseField name="nombre" type="string">Client name.</ResponseField>
+  </Expandable>
+</ResponseField>
+<ResponseField name="_count" type="object">
+  <Expandable title="_count fields">
+    <ResponseField name="locations" type="number">Number of locations in this plant.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+```bash
+curl -X GET "https://your-domain.com/api/plants?clientId=client_abc" \
+  -H "Cookie: sb-access-token=<token>"
+```
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `401` | Not authenticated. |
+| `403` | Insufficient permission (`plants:read` required). |
+| `500` | Internal server error. |
+
+---
+
+## POST /api/plants
+
+Creates a new plant under an existing client. Requires both `clientId` and `nombre`. The optional `lat` / `lng` fields enable map-based features in the UI. Creation is idempotent via `Idempotency-Key`. The action is recorded in the audit log.
+
+**Required permission:** `plants:write`
+
+<ParamField body="clientId" type="string" required>
+  ID of the parent client.
+</ParamField>
+
+<ParamField body="nombre" type="string" required>
+  Plant display name. Cannot be blank.
+</ParamField>
+
+<ParamField body="direccion" type="string">
+  Physical address of the plant site.
+</ParamField>
+
+<ParamField body="lat" type="number">
+  Latitude coordinate for map display.
+</ParamField>
+
+<ParamField body="lng" type="number">
+  Longitude coordinate for map display.
+</ParamField>
+
+<ResponseField name="id" type="string">Newly created plant ID.</ResponseField>
+<ResponseField name="clientId" type="string">Parent client ID.</ResponseField>
+<ResponseField name="nombre" type="string">Plant display name.</ResponseField>
+<ResponseField name="direccion" type="string">Physical address (nullable).</ResponseField>
+<ResponseField name="lat" type="number">Latitude (nullable).</ResponseField>
+<ResponseField name="lng" type="number">Longitude (nullable).</ResponseField>
+<ResponseField name="active" type="boolean">Always `true` on creation.</ResponseField>
+<ResponseField name="createdAt" type="string">ISO 8601 creation timestamp.</ResponseField>
+
+```bash
+curl -X POST "https://your-domain.com/api/plants" \
+  -H "Content-Type: application/json" \
+  -H "Cookie: sb-access-token=<token>" \
+  -d '{
+    "clientId": "client_abc",
+    "nombre": "Planta Norte",
+    "direccion": "Ruta 9, Km 42, Córdoba",
+    "lat": -31.4201,
+    "lng": -64.1888
+  }'
+```
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `400` | `clientId` or `nombre` is missing. |
+| `401` | Not authenticated. |
+| `403` | Insufficient permission (`plants:write` required). |
+| `500` | Internal server error. |
+
+---
+
+## GET /api/plants/[id]
+
+Returns a single plant record by ID.
+
+**Required permission:** `plants:read`
+
+<ResponseField name="id" type="string">Plant ID.</ResponseField>
+<ResponseField name="clientId" type="string">Parent client ID.</ResponseField>
+<ResponseField name="nombre" type="string">Plant display name.</ResponseField>
+<ResponseField name="direccion" type="string">Physical address (nullable).</ResponseField>
+<ResponseField name="lat" type="number">Latitude (nullable).</ResponseField>
+<ResponseField name="lng" type="number">Longitude (nullable).</ResponseField>
+<ResponseField name="active" type="boolean">Whether the plant is active.</ResponseField>
+<ResponseField name="createdAt" type="string">ISO 8601 creation timestamp.</ResponseField>
+<ResponseField name="updatedAt" type="string">ISO 8601 last-updated timestamp.</ResponseField>
+
+```bash
+curl -X GET "https://your-domain.com/api/plants/plant_xyz" \
+  -H "Cookie: sb-access-token=<token>"
+```
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `404` | Plant not found. |
+| `401` | Not authenticated. |
+| `403` | Insufficient permission (`plants:read` required). |
+| `500` | Internal server error. |
+
+---
+
+## PATCH /api/plants/[id]
+
+Updates one or more fields on an existing plant. Only fields present in the request body are updated. Setting `active: false` effectively deactivates the plant. All changes are recorded in the audit log.
+
+<Note>
+  The source implements this as `PUT` internally. Pass only the fields you wish to change.
+</Note>
+
+**Required permission:** `plants:write`
+
+<ParamField body="nombre" type="string">New display name.</ParamField>
+<ParamField body="direccion" type="string">New address. Pass `null` to clear.</ParamField>
+<ParamField body="clientId" type="string">Reassign to a different client.</ParamField>
+<ParamField body="active" type="boolean">Set to `false` to deactivate the plant.</ParamField>
+
+<ResponseField name="id" type="string">Plant ID.</ResponseField>
+<ResponseField name="nombre" type="string">Updated display name.</ResponseField>
+<ResponseField name="active" type="boolean">Current active state.</ResponseField>
+<ResponseField name="updatedAt" type="string">ISO 8601 last-updated timestamp.</ResponseField>
+
+```bash
+curl -X PATCH "https://your-domain.com/api/plants/plant_xyz" \
+  -H "Content-Type: application/json" \
+  -H "Cookie: sb-access-token=<token>" \
+  -d '{"nombre": "Planta Norte II"}'
+```
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `404` | Plant not found. |
+| `401` | Not authenticated. |
+| `403` | Insufficient permission (`plants:write` required). |
+| `500` | Internal server error. |
+
+---
+
+## GET /api/locations
+
+Returns all active locations. Results are sorted naturally by plant name then location name. Each location includes its parent plant (with client name), its sector (if assigned), and any dispenser currently in `IN_SERVICE` status at that location.
+
+**Required permission:** `locations:read`
+
+<ParamField query="plantId" type="string">
+  Filter locations to a specific plant.
+</ParamField>
+
+<ParamField query="sectorId" type="string">
+  Filter locations to a specific sector.
+</ParamField>
+
+<ResponseField name="id" type="string">Location ID (user-defined, globally unique).</ResponseField>
+<ResponseField name="plantId" type="string">Parent plant ID.</ResponseField>
+<ResponseField name="sectorId" type="string">Sector ID (nullable).</ResponseField>
+<ResponseField name="nombre" type="string">Location display name.</ResponseField>
+<ResponseField name="piso" type="string">Floor identifier (nullable).</ResponseField>
+<ResponseField name="area" type="string">Area within the sector (nullable).</ResponseField>
+<ResponseField name="descripcion" type="string">Free-text description (nullable).</ResponseField>
+<ResponseField name="active" type="boolean">Whether the location is active.</ResponseField>
+<ResponseField name="plant" type="object">
+  <Expandable title="plant fields">
+    <ResponseField name="id" type="string">Plant ID.</ResponseField>
+    <ResponseField name="nombre" type="string">Plant name.</ResponseField>
+    <ResponseField name="client" type="object">
+      <Expandable title="client fields">
+        <ResponseField name="nombre" type="string">Client name.</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+<ResponseField name="sector" type="object">
+  <Expandable title="sector fields">
+    <ResponseField name="id" type="string">Sector ID.</ResponseField>
+    <ResponseField name="nombre" type="string">Sector name.</ResponseField>
+  </Expandable>
+</ResponseField>
+<ResponseField name="dispensers" type="array">
+  Array of dispensers currently at this location with `status: IN_SERVICE`. Each entry includes `id`, `marca`, `modelo`, and `status`.
+</ResponseField>
+
+```bash
+curl -X GET "https://your-domain.com/api/locations?plantId=plant_xyz" \
+  -H "Cookie: sb-access-token=<token>"
+```
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `401` | Not authenticated. |
+| `403` | Insufficient permission (`locations:read` required). |
+| `500` | Internal server error. |
+
+---
+
+## POST /api/locations
+
+Creates a new location. The `id` field is the globally unique location code printed on QR codes — you may supply your own (e.g., `"A-102"`) or omit it to have the server auto-generate a sequential ID in the format `LOC-001`, `LOC-002`, etc. The `plantId` and `nombre` are always required. Creation is idempotent via `Idempotency-Key`. The action is recorded in the audit log.
+
+**Required permission:** `locations:write`
+
+<ParamField body="id" type="string">
+  User-defined globally unique location ID (e.g., `"SECTOR-A-101"`). If omitted or blank, the server auto-generates a sequential `LOC-NNN` ID.
+</ParamField>
+
+<ParamField body="plantId" type="string" required>
+  ID of the parent plant.
+</ParamField>
+
+<ParamField body="nombre" type="string" required>
+  Location display name. Cannot be blank.
+</ParamField>
+
+<ParamField body="sectorId" type="string">
+  ID of the sector this location belongs to.
+</ParamField>
+
+<ParamField body="piso" type="string">
+  Floor identifier (e.g., `"2"`, `"PB"`, `"Mezzanine"`).
+</ParamField>
+
+<ParamField body="area" type="string">
+  Area within the sector (e.g., `"Sala de reuniones"`).
+</ParamField>
+
+<ParamField body="descripcion" type="string">
+  Free-text description for technicians.
+</ParamField>
+
+<ResponseField name="id" type="string">Location ID (user-supplied or auto-generated).</ResponseField>
+<ResponseField name="plantId" type="string">Parent plant ID.</ResponseField>
+<ResponseField name="sectorId" type="string">Sector ID (nullable).</ResponseField>
+<ResponseField name="nombre" type="string">Location display name.</ResponseField>
+<ResponseField name="piso" type="string">Floor (nullable).</ResponseField>
+<ResponseField name="area" type="string">Area (nullable).</ResponseField>
+<ResponseField name="descripcion" type="string">Description (nullable).</ResponseField>
+<ResponseField name="active" type="boolean">Always `true` on creation.</ResponseField>
+<ResponseField name="createdAt" type="string">ISO 8601 creation timestamp.</ResponseField>
+
+```bash
+curl -X POST "https://your-domain.com/api/locations" \
+  -H "Content-Type: application/json" \
+  -H "Cookie: sb-access-token=<token>" \
+  -d '{
+    "plantId": "plant_xyz",
+    "sectorId": "sector_admin",
+    "nombre": "Recepción Principal",
+    "piso": "PB",
+    "area": "Hall de Entrada"
+  }'
+```
+
+<Warning>
+  Location IDs are **globally unique** across all plants and clients. If you supply a custom `id` that already exists anywhere in the system, the request returns `409 Conflict`.
+</Warning>
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `400` | `plantId` or `nombre` is missing. |
+| `409` | Supplied `id` already exists in the system. |
+| `401` | Not authenticated. |
+| `403` | Insufficient permission (`locations:write` required). |
+| `500` | Internal server error. |
+
+---
+
+## GET /api/locations/[id]
+
+Returns a single location by its unique ID.
+
+**Required permission:** `locations:read`
+
+<ResponseField name="id" type="string">Location ID.</ResponseField>
+<ResponseField name="plantId" type="string">Parent plant ID.</ResponseField>
+<ResponseField name="sectorId" type="string">Sector ID (nullable).</ResponseField>
+<ResponseField name="nombre" type="string">Location display name.</ResponseField>
+<ResponseField name="piso" type="string">Floor (nullable).</ResponseField>
+<ResponseField name="area" type="string">Area (nullable).</ResponseField>
+<ResponseField name="descripcion" type="string">Description (nullable).</ResponseField>
+<ResponseField name="active" type="boolean">Whether the location is active.</ResponseField>
+<ResponseField name="updatedAt" type="string">ISO 8601 last-updated timestamp.</ResponseField>
+
+```bash
+curl -X GET "https://your-domain.com/api/locations/LOC-042" \
+  -H "Cookie: sb-access-token=<token>"
+```
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `404` | Location not found. |
+| `401` | Not authenticated. |
+| `403` | Insufficient permission (`locations:read` required). |
+| `500` | Internal server error. |
+
+---
+
+## PATCH /api/locations/[id]
+
+Updates one or more fields on an existing location. Only fields present in the request body are modified. Setting `active: false` deactivates the location. Changes are recorded in the audit log.
+
+<Note>
+  The source implements this as `PUT` internally. Pass only the fields you wish to change.
+</Note>
+
+**Required permission:** `locations:write`
+
+<ParamField body="nombre" type="string">New display name.</ParamField>
+<ParamField body="plantId" type="string">Reassign to a different plant.</ParamField>
+<ParamField body="sectorId" type="string">Reassign to a different sector. Pass `null` to remove sector assignment.</ParamField>
+<ParamField body="piso" type="string">Updated floor. Pass `null` to clear.</ParamField>
+<ParamField body="area" type="string">Updated area. Pass `null` to clear.</ParamField>
+<ParamField body="descripcion" type="string">Updated description. Pass `null` to clear.</ParamField>
+<ParamField body="active" type="boolean">Set to `false` to deactivate the location.</ParamField>
+
+<ResponseField name="id" type="string">Location ID.</ResponseField>
+<ResponseField name="nombre" type="string">Updated display name.</ResponseField>
+<ResponseField name="active" type="boolean">Current active state.</ResponseField>
+<ResponseField name="updatedAt" type="string">ISO 8601 last-updated timestamp.</ResponseField>
+
+```bash
+curl -X PATCH "https://your-domain.com/api/locations/LOC-042" \
+  -H "Content-Type: application/json" \
+  -H "Cookie: sb-access-token=<token>" \
+  -d '{"piso": "1", "area": "Comedor"}'
+```
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `404` | Location not found. |
+| `401` | Not authenticated. |
+| `403` | Insufficient permission (`locations:write` required). |
+| `500` | Internal server error. |
+
+---
+
+## GET /api/sectors
+
+Returns all active sectors. When `plantId` is provided, returns only sectors associated with that plant via the `PlantSector` junction table. Without a `plantId`, returns all sectors with counts of associated locations and plants.
+
+**Required permission:** `sectors:read`
+
+<ParamField query="plantId" type="string">
+  Filter to sectors assigned to a specific plant.
+</ParamField>
+
+<ResponseField name="id" type="string">Sector ID.</ResponseField>
+<ResponseField name="nombre" type="string">Sector display name.</ResponseField>
+<ResponseField name="descripcion" type="string">Optional description (nullable).</ResponseField>
+<ResponseField name="active" type="boolean">Whether the sector is active.</ResponseField>
+<ResponseField name="createdAt" type="string">ISO 8601 creation timestamp.</ResponseField>
+<ResponseField name="_count" type="object">
+  Present when no `plantId` filter is applied.
+  <Expandable title="_count fields">
+    <ResponseField name="locations" type="number">Number of locations in this sector.</ResponseField>
+    <ResponseField name="plants" type="number">Number of plants this sector is assigned to.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+```bash
+curl -X GET "https://your-domain.com/api/sectors?plantId=plant_xyz" \
+  -H "Cookie: sb-access-token=<token>"
+```
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `401` | Not authenticated. |
+| `403` | Insufficient permission (`sectors:read` required). |
+| `500` | Internal server error. |
+
+---
+
+## POST /api/sectors
+
+Creates a new sector. Sectors are reusable across plants — the same sector can be assigned to multiple plants via the `PlantSector` join table. Creation is idempotent via `Idempotency-Key`. The action is recorded in the audit log.
+
+**Required permission:** `sectors:write`
+
+<ParamField body="nombre" type="string" required>
+  Sector display name. Cannot be blank.
+</ParamField>
+
+<ParamField body="descripcion" type="string">
+  Optional free-text description.
+</ParamField>
+
+<ResponseField name="id" type="string">Newly created sector ID.</ResponseField>
+<ResponseField name="nombre" type="string">Sector display name.</ResponseField>
+<ResponseField name="descripcion" type="string">Description (nullable).</ResponseField>
+<ResponseField name="active" type="boolean">Always `true` on creation.</ResponseField>
+<ResponseField name="createdAt" type="string">ISO 8601 creation timestamp.</ResponseField>
+
+```bash
+curl -X POST "https://your-domain.com/api/sectors" \
+  -H "Content-Type: application/json" \
+  -H "Cookie: sb-access-token=<token>" \
+  -d '{
+    "nombre": "Administración",
+    "descripcion": "Oficinas administrativas y salas de reuniones"
+  }'
+```
+
+<Tip>
+  After creating a sector, assign it to a plant by creating a `PlantSector` entry. Locations within that plant can then reference the sector by its `sectorId`.
+</Tip>
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `400` | `nombre` is missing or blank. |
+| `401` | Not authenticated. |
+| `403` | Insufficient permission (`sectors:write` required). |
+| `500` | Internal server error. |

@@ -1,0 +1,241 @@
+---
+title: "Notifications: Push Alerts and In-App Messages"
+sidebarTitle: "Notifications"
+description: "HDB Service delivers real-time notifications via OneSignal push and Nodemailer email for ticket events, SLA breaches, maintenance schedules, and low-stock alerts."
+---
+
+HDB Service operates a multi-channel notification system that keeps every stakeholder informed in real time. When a ticket is assigned, an SLA deadline is at risk, a maintenance visit is due, or stock falls below its minimum level, the platform fires targeted alerts through up to three channels simultaneously: **OneSignal push notifications** to the user's registered device, **Nodemailer transactional email** rendered from a database-stored template, and a persistent **in-app notification** stored in PostgreSQL and surfaced through the notifications API. All three channels are triggered by the same backend events, so no alert is silently dropped if one channel is unavailable.
+
+## Notification types
+
+Every notification — whether push, email, or in-app — is categorized by a `type` string stored on the `Notification` model. The following types are defined across the system:
+
+<CardGroup cols={2}>
+  <Card title="TICKET_ASSIGNED" icon="user-check">
+    Sent to the technician who has just been assigned to a ticket. Includes the ticket ID and location details so the technician can act immediately.
+  </Card>
+  <Card title="NEW_TICKET" icon="ticket">
+    Sent to ADMIN and SUPERVISOR users when a new ticket is created in the system. Ensures the operations team is aware of incoming service requests.
+  </Card>
+  <Card title="SLA_NEAR_BREACH" icon="clock">
+    Fired when a ticket's elapsed time reaches or exceeds **80%** of its SLA resolution deadline (configurable via `SlaConfig.nearBreachPercent`). Gives assignees a warning window before the deadline passes.
+  </Card>
+  <Card title="SLA_BREACHED" icon="triangle-exclamation">
+    Sent when a ticket's `slaResolutionDeadline` has passed without the ticket being resolved. Sets `slaResolutionBreached: true` on the ticket record.
+  </Card>
+  <Card title="MAINTENANCE_DUE" icon="wrench">
+    Sent for upcoming scheduled maintenance visits. Helps technicians and supervisors plan preventive maintenance workloads.
+  </Card>
+  <Card title="STOCK_LOW" icon="box">
+    Fired when a `StockEntry` has `cantidad < minLevel` (and `minLevel > 0`). Alerts inventory managers before stock reaches zero.
+  </Card>
+  <Card title="DEBT_CREATED" icon="arrow-right-arrow-left">
+    Sent when an `InterPlantDebt` record is created — i.e., when one plant lends a consumable to another. Notifies both the creditor and debtor plant contacts.
+  </Card>
+</CardGroup>
+
+## Push notifications (OneSignal)
+
+HDB Service integrates with the [OneSignal](https://onesignal.com) REST API through the `lib/onesignal.ts` helper module. Push notifications are delivered to mobile and web devices registered under a user's account.
+
+### Device registration
+
+Each `User` record has an optional `onesignalPlayerId` field. When a user signs in on a new device, the application registers the device with OneSignal and stores the resulting player ID on the user's record. Notifications are then targeted to that specific player ID.
+
+### Sending a push notification
+
+The `sendPushNotification` function accepts a list of `playerIds`, a `title`, a `message`, optional `data` payload, and an optional deep-link `url`:
+
+```typescript
+import { sendPushNotification } from '@/lib/onesignal';
+
+await sendPushNotification({
+  playerIds: ['player-id-abc123'],
+  title: 'Ticket Assigned',
+  message: 'You have been assigned to ticket #TK-0042.',
+  data: { type: 'TICKET_ASSIGNED', ticketId: 'tkt_xyz' },
+  url: '/tickets/tkt_xyz',
+});
+```
+
+### Notifying by role
+
+The `notifyByRole` helper queries the database for all active users with a given role that have a registered `onesignalPlayerId`, then dispatches a single batch push notification:
+
+```typescript
+import { notifyByRole } from '@/lib/onesignal';
+
+await notifyByRole(
+  'SUPERVISOR',
+  'Inventory Adjustment',
+  'Stock for FILT-5M at Plant North was manually adjusted.',
+  { type: 'STOCK_ADJUSTMENT', stockEntryId: 'se_abc' }
+);
+```
+
+This function is called, for example, when an inventory adjustment is performed — both ADMIN and SUPERVISOR users receive an immediate push alert with the before/after quantity and justification.
+
+### Configuration
+
+Set the following environment variables to enable push notifications:
+
+```bash
+ONESIGNAL_APP_ID=your-onesignal-app-id
+ONESIGNAL_API_KEY=your-onesignal-rest-api-key
+```
+
+<Warning>
+  If either `ONESIGNAL_APP_ID` or `ONESIGNAL_API_KEY` is missing, all push notification calls are silently skipped with a console warning. No error is thrown, so the triggering operation (ticket assignment, stock adjustment, etc.) completes normally.
+</Warning>
+
+## Email notifications
+
+Transactional email is handled by `lib/email.ts` using [Nodemailer](https://nodemailer.com). Email content is driven entirely by the `EmailTemplate` model — templates are stored in the database so they can be updated without a deployment.
+
+### EmailTemplate model
+
+| Field | Description |
+|-------|-------------|
+| `type` | Unique string key used to look up the template (e.g., `TICKET_CREATED`). |
+| `subject` | Email subject line, supporting `{variable}` interpolation. |
+| `body` | HTML body, supporting `{variable}` interpolation. Newlines are automatically converted to `<br />` tags. |
+
+The currently defined template types are:
+
+- **`WELCOME_TEMP_PASSWORD`** — Sent to a new user when their account is created with a temporary password.
+- **`TICKET_CREATED`** — Sent when a new ticket is submitted, typically to the assigned technician or supervisors.
+
+### Sending an email
+
+```typescript
+import { sendEmail } from '@/lib/email';
+
+await sendEmail({
+  to: 'technician@example.com',
+  templateType: 'TICKET_CREATED',
+  variables: {
+    ticketId: 'TK-0042',
+    location: 'Floor 3 - Water Station',
+    priority: 'HIGH',
+  },
+});
+```
+
+Variable interpolation replaces `{ticketId}`, `{location}`, and any other `{key}` placeholders in both the `subject` and `body` of the fetched template.
+
+### SMTP configuration
+
+SMTP settings are stored as `SystemSetting` records in the database under the following keys:
+
+| Key | Description |
+|-----|-------------|
+| `SMTP_HOST` | Outbound mail server hostname. |
+| `SMTP_PORT` | Port number (e.g., `587` for STARTTLS, `465` for SSL). |
+| `SMTP_USER` | SMTP authentication username. |
+| `SMTP_PASS` | SMTP authentication password. |
+| `SMTP_FROM_NAME` | Sender display name (defaults to `HDB Service`). |
+| `SMTP_FROM_EMAIL` | Sender email address (defaults to `SMTP_USER`). |
+
+<Note>
+  If `SMTP_HOST`, `SMTP_USER`, or `SMTP_PASS` are missing from the database settings, the email is silently skipped with a console warning. The triggering operation still completes.
+</Note>
+
+## In-app notifications
+
+In addition to push and email, every notification event creates a `Notification` record in the database. These records are surfaced in the application UI as an in-app notification feed.
+
+### Notification model fields
+
+<ResponseField name="userId" type="string" required>
+  The user this notification is addressed to.
+</ResponseField>
+
+<ResponseField name="title" type="string" required>
+  Short notification headline (e.g., `"Ticket Assigned"`).
+</ResponseField>
+
+<ResponseField name="message" type="string" required>
+  Full notification body text.
+</ResponseField>
+
+<ResponseField name="type" type="string" required>
+  One of the [notification types](#notification-types) listed above.
+</ResponseField>
+
+<ResponseField name="relatedId" type="string">
+  Optional ID of the entity that triggered the notification (e.g., a `ticketId`, `stockEntryId`, or `debtId`). Used by the UI to deep-link directly to the related record.
+</ResponseField>
+
+<ResponseField name="read" type="boolean">
+  `false` by default. Set to `true` when the user opens or dismisses the notification.
+</ResponseField>
+
+### Querying notifications
+
+```http
+GET /api/notifications
+GET /api/notifications?unread=true
+```
+
+Returns the 50 most recent notifications for the authenticated user, ordered by `createdAt` descending, along with a separate `unreadCount`:
+
+```json
+{
+  "notifications": [
+    {
+      "id": "notif_abc",
+      "title": "SLA Near Breach",
+      "message": "Ticket TK-0042 has reached 80% of its SLA deadline.",
+      "type": "SLA_NEAR_BREACH",
+      "relatedId": "tkt_xyz",
+      "read": false,
+      "createdAt": "2025-06-01T14:23:00.000Z"
+    }
+  ],
+  "unreadCount": 3
+}
+```
+
+Pass `?unread=true` to receive only unread notifications.
+
+### Marking notifications as read
+
+```http
+PUT /api/notifications
+```
+
+```json
+{ "id": "notif_abc" }
+```
+
+To mark **all** notifications as read at once:
+
+```json
+{ "all": true }
+```
+
+### Deleting notifications
+
+```http
+DELETE /api/notifications
+```
+
+Accepts the same `{ "id": "..." }` or `{ "all": true }` body, or `?id=...` / `?all=true` query parameters. Deletes only notifications belonging to the authenticated user.
+
+## Notification preferences
+
+When a ticket is created, the reporter can opt into push and/or email alerts for that specific ticket by setting flags on the ticket record:
+
+<ResponseField name="wantsPushNotifications" type="boolean">
+  When `true`, the reporter receives push notifications for status changes and SLA events on this ticket. Defaults to `false`.
+</ResponseField>
+
+<ResponseField name="wantsEmailNotifications" type="boolean">
+  When `true`, the reporter receives email notifications for status changes and SLA events on this ticket. Defaults to `false`.
+</ResponseField>
+
+These flags are set at ticket creation time and can be used by event handlers to decide whether to fire push or email channels for a given reporter, in addition to always notifying assigned technicians and supervisors.
+
+<Note>
+  ADMIN and SUPERVISOR users always receive notifications for new tickets and SLA breaches regardless of individual ticket preferences. These role-wide alerts are fired via `notifyByRole`, which targets all active users of a given role that have a registered `onesignalPlayerId`.
+</Note>

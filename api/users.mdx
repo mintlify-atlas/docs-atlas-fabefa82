@@ -1,0 +1,260 @@
+---
+title: "Users API Endpoints — Create, Update, and Manage Access"
+sidebarTitle: "Users"
+description: "REST API reference for user management: list users, create with role assignment, update profile and plant access, and deactivate accounts."
+---
+
+The Users API manages platform accounts in HDB Service. Every user has a role drawn from the `UserRole` enum (`ADMIN`, `SUPERVISOR`, `TECHNICIAN`, `CLIENT_RESPONSIBLE`, `CLIENT_REQUESTER`) which controls what data they can see and what actions they can perform. When a new user is created, the system simultaneously registers them in Supabase Auth and in the local PostgreSQL database via Prisma. The user is created with `mustChangePassword: true` so they are prompted to choose their own password on first login.
+
+All users endpoints are restricted to `ADMIN` role, with `GET /api/users` also accessible to `SUPERVISOR`. `passwordHash` is never included in any response.
+
+---
+
+## GET /api/users
+
+Returns all user records. Each record includes the associated client name and the list of plant IDs the user has been granted access to. The `passwordHash` field is never returned.
+
+**Required roles:** `ADMIN`, `SUPERVISOR`
+
+<ParamField query="role" type="string">
+  Filter by user role. One of `ADMIN`, `SUPERVISOR`, `TECHNICIAN`, `CLIENT_RESPONSIBLE`, or `CLIENT_REQUESTER`.
+</ParamField>
+
+<ParamField query="clientId" type="string">
+  Filter users by their associated client ID.
+</ParamField>
+
+<ParamField query="active" type="boolean">
+  Filter by active status. Pass `true` for active users only or `false` for deactivated accounts.
+</ParamField>
+
+<ResponseField name="id" type="string">User ID (matches the Supabase Auth user UUID).</ResponseField>
+<ResponseField name="nombre" type="string">First name.</ResponseField>
+<ResponseField name="apellido" type="string">Last name (nullable).</ResponseField>
+<ResponseField name="email" type="string">Email address.</ResponseField>
+<ResponseField name="role" type="string">User role: `ADMIN`, `SUPERVISOR`, `TECHNICIAN`, `CLIENT_RESPONSIBLE`, or `CLIENT_REQUESTER`.</ResponseField>
+<ResponseField name="active" type="boolean">Whether the account is active.</ResponseField>
+<ResponseField name="clientId" type="string">Associated client ID (nullable — only set for `CLIENT_RESPONSIBLE` and `CLIENT_REQUESTER`).</ResponseField>
+<ResponseField name="createdAt" type="string">ISO 8601 account creation timestamp.</ResponseField>
+<ResponseField name="client" type="object">
+  <Expandable title="client fields">
+    <ResponseField name="nombre" type="string">Client display name.</ResponseField>
+  </Expandable>
+</ResponseField>
+<ResponseField name="plantAccess" type="array">
+  Array of objects, each containing a `plantId` string. Populated for `CLIENT_REQUESTER` users; empty for other roles.
+</ResponseField>
+
+```bash
+curl -X GET "https://your-domain.com/api/users?role=TECHNICIAN" \
+  -H "Cookie: sb-access-token=<token>"
+```
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `401` | Not authenticated. |
+| `403` | Authenticated user is not `ADMIN` or `SUPERVISOR`. |
+| `500` | Internal server error. |
+
+---
+
+## POST /api/users
+
+Creates a new user account. The process involves three steps executed in sequence: (1) verify the email does not already exist in the Prisma database; (2) create the user in Supabase Auth with `email_confirm: true` so no verification email is required; (3) create the Prisma user record with a bcrypt-hashed password and `mustChangePassword: true`. Plant access entries are created in bulk via `UserPlantAccess` if `plantIds` is provided.
+
+**Required role:** `ADMIN`
+
+<ParamField body="email" type="string" required>
+  Email address. Must be unique across all users.
+</ParamField>
+
+<ParamField body="nombre" type="string" required>
+  User's first name.
+</ParamField>
+
+<ParamField body="apellido" type="string">
+  User's last name.
+</ParamField>
+
+<ParamField body="role" type="string" required>
+  User role. One of `ADMIN`, `SUPERVISOR`, `TECHNICIAN`, `CLIENT_RESPONSIBLE`, or `CLIENT_REQUESTER`.
+</ParamField>
+
+<ParamField body="password" type="string" required>
+  Temporary password. Stored as a bcrypt hash (10 rounds). The user will be prompted to change it on first login.
+</ParamField>
+
+<ParamField body="clientId" type="string">
+  Required when `role` is `CLIENT_RESPONSIBLE` or `CLIENT_REQUESTER`. Associates the user with a specific client.
+</ParamField>
+
+<ParamField body="plantIds" type="string[]">
+  Array of plant IDs to grant access to. Applicable for `CLIENT_REQUESTER` users. Each entry creates a `UserPlantAccess` record.
+</ParamField>
+
+<ResponseField name="id" type="string">User ID (the Supabase Auth UUID is used as the Prisma primary key).</ResponseField>
+<ResponseField name="email" type="string">User email address.</ResponseField>
+<ResponseField name="nombre" type="string">First name.</ResponseField>
+<ResponseField name="apellido" type="string">Last name (nullable).</ResponseField>
+<ResponseField name="role" type="string">Assigned role.</ResponseField>
+<ResponseField name="active" type="boolean">Always `true` on creation.</ResponseField>
+<ResponseField name="clientId" type="string">Associated client ID (nullable).</ResponseField>
+<ResponseField name="mustChangePassword" type="boolean">Always `true` on creation.</ResponseField>
+<ResponseField name="createdAt" type="string">ISO 8601 creation timestamp.</ResponseField>
+
+```bash
+curl -X POST "https://your-domain.com/api/users" \
+  -H "Content-Type: application/json" \
+  -H "Cookie: sb-access-token=<token>" \
+  -d '{
+    "email": "juan.perez@acme.com",
+    "nombre": "Juan",
+    "apellido": "Pérez",
+    "role": "CLIENT_REQUESTER",
+    "password": "TempPass123!",
+    "clientId": "client_abc",
+    "plantIds": ["plant_xyz", "plant_north"]
+  }'
+```
+
+<Note>
+  The user's Supabase Auth UUID is reused as the Prisma `User.id`, so the two records are always in sync and can be looked up by the same ID.
+</Note>
+
+<Warning>
+  Passwords are stored as bcrypt hashes. Never log or expose the plain-text `password` value received in the request body.
+</Warning>
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `400` | `email`, `nombre`, `role`, or `password` is missing. |
+| `400` | A user with this email already exists in the database. |
+| `400` | Supabase Auth rejected the creation request (e.g., invalid email format). |
+| `401` | Not authenticated. |
+| `403` | Authenticated user is not `ADMIN`. |
+| `500` | Internal server error. |
+
+---
+
+## GET /api/users/[id]
+
+Returns a single user's full profile, including their plant access list. The `passwordHash` field is excluded from the response.
+
+**Required role:** `ADMIN`
+
+<ResponseField name="id" type="string">User ID.</ResponseField>
+<ResponseField name="nombre" type="string">First name.</ResponseField>
+<ResponseField name="apellido" type="string">Last name (nullable).</ResponseField>
+<ResponseField name="email" type="string">Email address.</ResponseField>
+<ResponseField name="role" type="string">User role.</ResponseField>
+<ResponseField name="active" type="boolean">Whether the account is active.</ResponseField>
+<ResponseField name="clientId" type="string">Associated client ID (nullable).</ResponseField>
+<ResponseField name="mustChangePassword" type="boolean">Whether the user must change their password on next login.</ResponseField>
+<ResponseField name="onesignalPlayerId" type="string">OneSignal device player ID for push notifications (nullable).</ResponseField>
+<ResponseField name="createdAt" type="string">ISO 8601 creation timestamp.</ResponseField>
+<ResponseField name="updatedAt" type="string">ISO 8601 last-updated timestamp.</ResponseField>
+<ResponseField name="plantAccess" type="array">
+  <Expandable title="plantAccess entry fields">
+    <ResponseField name="plantId" type="string">Plant ID the user has access to.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+```bash
+curl -X GET "https://your-domain.com/api/users/usr_abc123" \
+  -H "Cookie: sb-access-token=<token>"
+```
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `404` | User not found. |
+| `401` | Not authenticated. |
+| `403` | Authenticated user is not `ADMIN`. |
+| `500` | Internal server error. |
+
+---
+
+## PATCH /api/users/[id]
+
+Updates one or more fields on an existing user. Only fields present in the request body are modified; omitted fields are left unchanged. If `plantIds` is included, the existing `UserPlantAccess` records for this user are **fully replaced** (all deleted and recreated from the new array). If a new `password` is provided, it is hashed with bcrypt and `mustChangePassword` is set to `true`. Relevant changes (name, role, password) are also synced to Supabase Auth metadata.
+
+An `ADMIN` cannot deactivate their own account (`active: false` on the currently authenticated user returns `400`).
+
+**Required role:** `ADMIN`
+
+<ParamField body="nombre" type="string">Updated first name.</ParamField>
+<ParamField body="apellido" type="string">Updated last name.</ParamField>
+<ParamField body="role" type="string">New role. One of `ADMIN`, `SUPERVISOR`, `TECHNICIAN`, `CLIENT_RESPONSIBLE`, `CLIENT_REQUESTER`.</ParamField>
+<ParamField body="clientId" type="string">New client association. Pass `null` to clear.</ParamField>
+<ParamField body="plantIds" type="string[]">Full replacement list of plant IDs for access control. All previous `UserPlantAccess` entries are deleted and replaced with this list.</ParamField>
+<ParamField body="active" type="boolean">Set to `false` to deactivate the account.</ParamField>
+<ParamField body="password" type="string">New password. Will be hashed and will set `mustChangePassword: true`.</ParamField>
+<ParamField body="onesignalPlayerId" type="string">OneSignal device player ID for push notification targeting.</ParamField>
+
+<ResponseField name="id" type="string">User ID.</ResponseField>
+<ResponseField name="nombre" type="string">Updated first name.</ResponseField>
+<ResponseField name="apellido" type="string">Updated last name (nullable).</ResponseField>
+<ResponseField name="email" type="string">Email address (unchanged).</ResponseField>
+<ResponseField name="role" type="string">Updated role.</ResponseField>
+<ResponseField name="active" type="boolean">Current active state.</ResponseField>
+<ResponseField name="clientId" type="string">Current client association (nullable).</ResponseField>
+<ResponseField name="mustChangePassword" type="boolean">Current must-change-password flag.</ResponseField>
+<ResponseField name="updatedAt" type="string">ISO 8601 last-updated timestamp.</ResponseField>
+
+```bash
+curl -X PATCH "https://your-domain.com/api/users/usr_abc123" \
+  -H "Content-Type: application/json" \
+  -H "Cookie: sb-access-token=<token>" \
+  -d '{
+    "role": "CLIENT_RESPONSIBLE",
+    "clientId": "client_abc",
+    "plantIds": []
+  }'
+```
+
+<Warning>
+  Passing `plantIds` always performs a full replacement — even an empty array `[]` will remove all existing plant access for the user. Omit the `plantIds` key entirely if you do not wish to modify plant access.
+</Warning>
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `400` | Attempting to deactivate the currently authenticated user's own account. |
+| `404` | User not found. |
+| `401` | Not authenticated. |
+| `403` | Authenticated user is not `ADMIN`. |
+| `500` | Internal server error. |
+
+---
+
+## DELETE /api/users/[id]
+
+Permanently deletes a user account from both the Prisma database and Supabase Auth. An `ADMIN` cannot delete their own account. This is a hard delete — the record is not soft-deleted.
+
+**Required role:** `ADMIN`
+
+<ResponseField name="success" type="boolean">Always `true` on a successful deletion.</ResponseField>
+
+```bash
+curl -X DELETE "https://your-domain.com/api/users/usr_abc123" \
+  -H "Cookie: sb-access-token=<token>"
+```
+
+<Warning>
+  This endpoint performs a **hard delete** — the user record is permanently removed from both the application database and Supabase Auth. All associated records (plant access entries, etc.) are cascade-deleted. This action cannot be undone. Consider using `PATCH` with `active: false` for reversible deactivation.
+</Warning>
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `400` | Attempting to delete the currently authenticated user's own account. |
+| `401` | Not authenticated. |
+| `403` | Authenticated user is not `ADMIN`. |
+| `500` | Internal server error. |

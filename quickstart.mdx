@@ -1,47 +1,154 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with HDB Service in 5 Steps"
+sidebarTitle: "Quickstart"
+description: "Clone HDB Service, configure your environment, migrate the database, and launch the dev server — all in under 10 minutes."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
-
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+This guide walks you through everything you need to get HDB Service running on your local machine. By the end you'll have a fully functional development environment connected to a PostgreSQL database, seeded with a sample client hierarchy, and ready to log in as an ADMIN user. The entire process should take less than 10 minutes.
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+
+  <Step title="Clone the repository">
+    Clone the HDB Service repository from GitHub and navigate into the project directory:
 
     ```bash
-    npm install your-package
+    git clone https://github.com/GianlucaBessone/HDB-Service.git
+    cd HDB-Service
     ```
   </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+
+  <Step title="Install dependencies">
+    Install all Node.js dependencies using your preferred package manager. The `postinstall` script automatically runs `prisma generate` so the Prisma Client is ready immediately after install.
+
+    <CodeGroup>
+      ```bash npm
+      npm install
+      ```
+
+      ```bash yarn
+      yarn install
+      ```
+
+      ```bash pnpm
+      pnpm install
+      ```
+    </CodeGroup>
+  </Step>
+
+  <Step title="Configure environment variables">
+    Copy the example environment file to create your local configuration:
 
     ```bash
-    your-cli init
+    cp .env.example .env.local
     ```
+
+    Then open `.env.local` and fill in the values for your environment. Below is a description of every variable:
+
+    <ParamField body="DATABASE_URL" type="string" required>
+      PostgreSQL connection string used by Prisma at runtime (via PgBouncer/pooled connection in Supabase). Format: `postgresql://user:password@host:5432/hdb_service?sslmode=require`
+    </ParamField>
+
+    <ParamField body="NEXTAUTH_URL" type="string" required>
+      The canonical URL of your application. Set to `http://localhost:3000` for local development. In production, use your full domain, e.g. `https://hdb.yourdomain.com`.
+    </ParamField>
+
+    <ParamField body="NEXTAUTH_SECRET" type="string" required>
+      A random secret used to sign session tokens. Must be at least 32 characters. Generate one with `openssl rand -base64 32`.
+    </ParamField>
+
+    <ParamField body="ONESIGNAL_APP_ID" type="string">
+      Your OneSignal application ID, found in the OneSignal dashboard under **Settings → Keys & IDs**. Required for push notifications.
+    </ParamField>
+
+    <ParamField body="ONESIGNAL_API_KEY" type="string">
+      Your OneSignal REST API key. Used server-side to send push notifications to users. Found alongside the App ID in the OneSignal dashboard.
+    </ParamField>
+
+    <ParamField body="APP_URL" type="string" required>
+      The public base URL of the application. Used to construct absolute links in emails and notifications. Set to `http://localhost:3000` locally.
+    </ParamField>
+
+    <ParamField body="CRON_SECRET" type="string" required>
+      A secret token that must be included in requests to `/api/cron` to prevent unauthorised triggering of scheduled jobs. Generate a strong random string with `openssl rand -hex 32`.
+    </ParamField>
+
+    <Tip>
+      For local development without push notifications, you can leave `ONESIGNAL_APP_ID` and `ONESIGNAL_API_KEY` empty — the platform will function normally, but no push notifications will be delivered.
+    </Tip>
   </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+
+  <Step title="Run Prisma migrations and seed">
+    Generate the Prisma Client and push the schema to your database:
 
     ```bash
-    your-cli start
+    # Generate the typed Prisma Client
+    npx prisma generate
+
+    # Push schema to the database (development only — see deployment guide for production)
+    npx prisma db push
     ```
+
+    Then seed the database with a sample client hierarchy, dispenser data, and the material catalog:
+
+    ```bash
+    # Seed demo data and material catalog
+    npm run seed
+    ```
+
+    <Warning>
+      `prisma db push` is intended for development only. For production deployments, use `npx prisma migrate deploy` instead. See the [Deployment](/deployment) guide for details.
+    </Warning>
   </Step>
+
+  <Step title="Start the development server">
+    Launch the Next.js development server:
+
+    ```bash
+    npm run dev
+    ```
+
+    Once the server is ready, open your browser and navigate to:
+
+    ```
+    http://localhost:3000
+    ```
+
+    You should see the HDB Service login screen.
+  </Step>
+
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## First login
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
-</Tip>
+The seed script (`prisma/seed.ts`) creates several users automatically, all with the initial password `password123`. The primary ADMIN account is:
+
+| Field | Value |
+|---|---|
+| Email | `gbessone.hdb@gmail.com` |
+| Password | `password123` |
+| Role | `ADMIN` |
+
+Additional seeded users include `supervisor@hdb.com` (SUPERVISOR) and `tech1@hdb.com` (TECHNICIAN), all sharing the same initial password.
+
+The `User` model includes a `mustChangePassword` boolean flag. When this flag is `true`, users are redirected to a password-change screen after login before they can access any other part of the application. Any user account created by an admin through the UI will have this flag set to `true` by default, prompting the new user to set their own password on first access.
+
+<Note>
+  The seed data includes a fully configured **Arcor S.A.** client with multiple plants, sectors, locations, dispensers, and SLA configuration — giving you a realistic dataset to explore every feature of the platform immediately after setup.
+</Note>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Business Hierarchy" icon="sitemap" href="/concepts/hierarchy">
+    Understand how Clients, Plants, Sectors, Locations, and Dispensers are structured and how to navigate between them.
+  </Card>
+  <Card title="Roles & Permissions" icon="shield-check" href="/concepts/roles-permissions">
+    A deep dive into the five user roles and the fine-grained permission matrix that controls what each role can see and do.
+  </Card>
+  <Card title="SLA Configuration" icon="clock" href="/concepts/sla">
+    Learn how per-client SLA configs drive response and resolution deadlines, near-breach alerts, and breach tracking.
+  </Card>
+  <Card title="Environment Reference" icon="sliders" href="/configuration/environment">
+    Complete reference for all environment variables, including optional OneSignal and cron settings.
+  </Card>
+</CardGroup>

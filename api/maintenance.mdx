@@ -1,0 +1,562 @@
+---
+title: "Maintenance API Endpoints — Schedules, Checklists, and Approvals"
+sidebarTitle: "Maintenance"
+description: "REST API reference for maintenance scheduling: list schedules, generate monthly plans, submit checklists, complete visits, and manage digital approval signatures."
+---
+
+The Maintenance API manages the monthly preventive maintenance cycle for water dispenser fleets. Each month a batch of `MaintenanceSchedule` records is generated — one per active dispenser — and technicians then visit, complete a structured checklist, and obtain a digital signature from the customer representative. The resulting `MaintenanceApproval` carries a SHA-512 + AES-256-GCM cryptographic signature that can be independently verified without authentication.
+
+---
+
+## GET /api/maintenance
+
+Returns all maintenance schedules matching the supplied filters, ordered by `scheduledMonth` (descending) then `dispenserId` (ascending). Each schedule includes the linked dispenser and its checklist.
+
+**Required permission:** `maintenance:read`
+
+### Query parameters
+
+<ParamField query="month" type="string">
+  Filter by scheduled month in `YYYY-MM` format (e.g. `2024-06`).
+</ParamField>
+
+<ParamField query="plantId" type="string">
+  Filter by the plant ID of the dispenser's current location.
+</ParamField>
+
+<ParamField query="status" type="MaintenanceStatus">
+  Filter by schedule status. Accepted values: `PENDING`, `COMPLETED`, `OVERDUE`, `EXPIRED`, `SIGNED`.
+</ParamField>
+
+### Response fields
+
+<ResponseField name="(root)" type="MaintenanceSchedule[]">
+  Array of schedule objects. Each object contains:
+</ResponseField>
+
+<ResponseField name="id" type="string">
+  Schedule ID (CUID).
+</ResponseField>
+
+<ResponseField name="dispenserId" type="string">
+  Associated dispenser ID.
+</ResponseField>
+
+<ResponseField name="scheduledMonth" type="string">
+  Month in `YYYY-MM` format.
+</ResponseField>
+
+<ResponseField name="status" type="MaintenanceStatus">
+  Current schedule status.
+</ResponseField>
+
+<ResponseField name="dispenser" type="object">
+  Nested dispenser with `id`, `marca`, `modelo`, and its `location` (including `plant.nombre`).
+</ResponseField>
+
+<ResponseField name="checklist" type="MaintenanceChecklist | null">
+  Linked checklist if completed; `null` if the visit has not occurred yet.
+</ResponseField>
+
+<ResponseField name="approvalId" type="string | null">
+  ID of the linked `MaintenanceApproval` if signed.
+</ResponseField>
+
+<ResponseField name="createdAt" type="string">
+  ISO 8601 creation timestamp.
+</ResponseField>
+
+### Example
+
+```bash
+curl -X GET "https://your-domain.com/api/maintenance?month=2024-06&status=PENDING" \
+  -H "Cookie: sb-access-token=<token>"
+```
+
+```json
+[
+  {
+    "id": "maint-sched-001",
+    "dispenserId": "DISP-042",
+    "scheduledMonth": "2024-06",
+    "status": "PENDING",
+    "approvalId": null,
+    "createdAt": "2024-06-01T00:00:00.000Z",
+    "dispenser": {
+      "id": "DISP-042",
+      "marca": "Acuaservice",
+      "modelo": "Pro 600",
+      "location": {
+        "nombre": "Comedor",
+        "plant": { "nombre": "Planta Norte" }
+      }
+    },
+    "checklist": null
+  }
+]
+```
+
+### Error cases
+
+| Status | Description |
+|--------|-------------|
+| `401`  | Missing or invalid authentication session. |
+| `403`  | Caller lacks `maintenance:read`. |
+
+---
+
+## POST /api/maintenance/generate
+
+Generates `PENDING` maintenance schedules for a given month. The endpoint iterates over all active dispensers with status `IN_SERVICE`, `BACKUP`, `UNDER_REPAIR`, or `IN_TECHNICAL_SERVICE`, and creates one schedule per dispenser that does not already have one for the requested month. Existing schedules are silently skipped.
+
+**Required permission:** `maintenance:write`
+
+### Request body
+
+<ParamField body="month" type="string" required>
+  Target month in `YYYY-MM` format (e.g. `"2024-07"`). Must match the pattern exactly — any other format returns `400`.
+</ParamField>
+
+### Response fields
+
+<ResponseField name="success" type="boolean">
+  `true` when the operation completed without error.
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  Human-readable summary of results.
+</ResponseField>
+
+<ResponseField name="created" type="number">
+  Number of new schedule records created.
+</ResponseField>
+
+<ResponseField name="skipped" type="number">
+  Number of dispensers that already had a schedule for the month and were therefore skipped.
+</ResponseField>
+
+### Example
+
+```bash
+curl -X POST "https://your-domain.com/api/maintenance/generate" \
+  -H "Cookie: sb-access-token=<token>" \
+  -H "Content-Type: application/json" \
+  -d '{ "month": "2024-07" }'
+```
+
+```json
+{
+  "success": true,
+  "message": "Mantenimiento generado: 38 creados, 2 ya existían.",
+  "created": 38,
+  "skipped": 2
+}
+```
+
+### Error cases
+
+| Status | Description |
+|--------|-------------|
+| `400`  | `month` is missing or does not match `YYYY-MM`. |
+| `401`  | Missing or invalid authentication session. |
+| `403`  | Caller lacks `maintenance:write`. |
+
+---
+
+## POST /api/maintenance/\{id\}/checklist
+
+Submits a maintenance checklist for a schedule and transitions it to `COMPLETED`. The operation is fully transactional: consumables/spare parts consumed during the visit are deducted from plant inventory in the same atomic unit.
+
+<Note>
+  This endpoint can only be called once per schedule. A `400` error is returned if a checklist already exists for the schedule.
+</Note>
+
+**Required permission:** `maintenance:write`
+
+### Request body
+
+<ParamField body="condicionGeneral" type="ConditionRating" required>
+  Overall equipment condition. Accepted values: `GOOD`, `FAIR`, `POOR`, `CRITICAL`.
+</ParamField>
+
+<ParamField body="fallas" type="string[]">
+  List of detected failures or malfunctions. Stored as a JSON array.
+</ParamField>
+
+<ParamField body="problemasEstructurales" type="string[]">
+  List of structural or physical problems observed. Stored as a JSON array.
+</ParamField>
+
+<ParamField body="observaciones" type="string">
+  Free-text observations and technician notes.
+</ParamField>
+
+<ParamField body="consumablesUsed" type="array">
+  Consumables and spare parts installed during the visit. Stock is deducted from the dispenser's plant inventory.
+
+  <Expandable title="consumablesUsed entry">
+    <ParamField body="materialCode" type="string" required>
+      Catalog material code. Must exist in `MaterialCatalog`.
+    </ParamField>
+    <ParamField body="nombre" type="string" required>
+      Display name for the item.
+    </ParamField>
+    <ParamField body="cantidad" type="number" required>
+      Quantity consumed (must be > 0).
+    </ParamField>
+    <ParamField body="type" type="string">
+      `"SERIALIZED"` or `"BULK"`. Serialized items require an `id` field pointing to the specific `Consumable` record.
+    </ParamField>
+    <ParamField body="id" type="string">
+      Internal `Consumable.id` — required when `type` is `"SERIALIZED"`.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Response fields
+
+<ResponseField name="success" type="boolean">
+  `true` when checklist and schedule were updated successfully.
+</ResponseField>
+
+<ResponseField name="checklist" type="MaintenanceChecklist">
+  The newly created checklist record.
+
+  <Expandable title="checklist fields">
+    <ResponseField name="id" type="string">
+      Checklist ID (CUID).
+    </ResponseField>
+    <ResponseField name="scheduleId" type="string">
+      Parent schedule ID.
+    </ResponseField>
+    <ResponseField name="condicionGeneral" type="ConditionRating">
+      General condition rating submitted.
+    </ResponseField>
+    <ResponseField name="fallas" type="string[]">
+      Failure list.
+    </ResponseField>
+    <ResponseField name="problemasEstructurales" type="string[]">
+      Structural issues list.
+    </ResponseField>
+    <ResponseField name="observaciones" type="string | null">
+      Free-text observations.
+    </ResponseField>
+    <ResponseField name="completedById" type="string">
+      ID of the user who completed the checklist.
+    </ResponseField>
+    <ResponseField name="completedAt" type="string">
+      ISO 8601 completion timestamp.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="schedule" type="MaintenanceSchedule">
+  The updated schedule with `status: "COMPLETED"`.
+</ResponseField>
+
+### Example
+
+```bash
+curl -X POST "https://your-domain.com/api/maintenance/maint-sched-001/checklist" \
+  -H "Cookie: sb-access-token=<token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "condicionGeneral": "GOOD",
+    "fallas": [],
+    "problemasEstructurales": [],
+    "observaciones": "Filtros reemplazados. Equipo operativo.",
+    "consumablesUsed": [
+      {
+        "materialCode": "FILT-001",
+        "nombre": "Filtro de carbón activado",
+        "cantidad": 1,
+        "type": "BULK"
+      }
+    ]
+  }'
+```
+
+```json
+{
+  "success": true,
+  "checklist": {
+    "id": "clxchecklist001",
+    "scheduleId": "maint-sched-001",
+    "condicionGeneral": "GOOD",
+    "fallas": [],
+    "problemasEstructurales": [],
+    "observaciones": "Filtros reemplazados. Equipo operativo.",
+    "completedById": "user-tech-007",
+    "completedAt": "2024-06-15T10:00:00.000Z"
+  },
+  "schedule": {
+    "id": "maint-sched-001",
+    "dispenserId": "DISP-042",
+    "scheduledMonth": "2024-06",
+    "status": "COMPLETED"
+  }
+}
+```
+
+<Warning>
+  If the plant has insufficient stock for any listed consumable, the entire transaction is rolled back. No checklist is created, the schedule status remains `PENDING`, and no stock is modified. The response body will contain a descriptive `error` string.
+</Warning>
+
+### Error cases
+
+| Status | Description |
+|--------|-------------|
+| `400`  | `condicionGeneral` is missing, or the checklist was already submitted for this schedule, or insufficient stock for a listed consumable. |
+| `401`  | Missing or invalid authentication session. |
+| `403`  | Caller lacks `maintenance:write`. |
+| `404`  | Schedule not found. |
+
+---
+
+## POST /api/maintenance/\{id\}/complete
+
+An alternative completion endpoint that creates both the checklist and marks the schedule `COMPLETED` in one step. Unlike the dedicated `/checklist` endpoint, this variant also accepts `fotosUrls` for photo evidence and is intended for mobile flows where photos are uploaded as part of completion.
+
+**Required permission:** `maintenance:write`
+
+### Request body
+
+<ParamField body="condicionGeneral" type="ConditionRating" required>
+  Overall equipment condition. Accepted values: `GOOD`, `FAIR`, `POOR`, `CRITICAL`.
+</ParamField>
+
+<ParamField body="fallas" type="string[]">
+  List of detected failures.
+</ParamField>
+
+<ParamField body="problemasEstructurales" type="string[]">
+  List of structural problems.
+</ParamField>
+
+<ParamField body="observaciones" type="string">
+  Free-text observations.
+</ParamField>
+
+<ParamField body="fotosUrls" type="string[]">
+  Array of photo URLs or base64-encoded image strings captured during the visit.
+</ParamField>
+
+### Response fields
+
+<ResponseField name="id" type="string">
+  Schedule ID.
+</ResponseField>
+
+<ResponseField name="status" type="string">
+  Always `COMPLETED` on success.
+</ResponseField>
+
+<ResponseField name="dispenserId" type="string">
+  The associated dispenser ID.
+</ResponseField>
+
+<ResponseField name="scheduledMonth" type="string">
+  Month in `YYYY-MM` format.
+</ResponseField>
+
+### Example
+
+```bash
+curl -X POST "https://your-domain.com/api/maintenance/maint-sched-002/complete" \
+  -H "Cookie: sb-access-token=<token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "condicionGeneral": "FAIR",
+    "fallas": ["Dispensador lento en modo frío"],
+    "problemasEstructurales": [],
+    "observaciones": "Se lubricaron rodamientos. Revisión adicional recomendada próximo mes.",
+    "fotosUrls": ["https://storage.example.com/maint/photo1.jpg"]
+  }'
+```
+
+```json
+{
+  "id": "maint-sched-002",
+  "dispenserId": "DISP-099",
+  "scheduledMonth": "2024-06",
+  "status": "COMPLETED",
+  "createdAt": "2024-06-01T00:00:00.000Z"
+}
+```
+
+### Error cases
+
+| Status | Description |
+|--------|-------------|
+| `400`  | `condicionGeneral` is missing, or the schedule is already `COMPLETED`. |
+| `401`  | Missing or invalid authentication session. |
+| `403`  | Caller lacks `maintenance:write`. |
+| `404`  | Schedule not found. |
+
+---
+
+## GET /api/maintenance/approvals
+
+Returns all maintenance approvals that carry a digital signature (`signatureData` or `signatureHash` is present), ordered newest-first. Each approval includes the linked technician and all associated maintenance schedules with their dispenser and location data.
+
+**Required permission:** `maintenance:read`
+
+### Query parameters
+
+<ParamField query="plantId" type="string">
+  Filter approvals where at least one linked schedule belongs to a dispenser at the given plant.
+</ParamField>
+
+<ParamField query="startDate" type="string">
+  ISO 8601 date — returns approvals created on or after this date.
+</ParamField>
+
+<ParamField query="endDate" type="string">
+  ISO 8601 date — returns approvals created on or before this date (time is set to 23:59:59.999).
+</ParamField>
+
+<ParamField query="search" type="string">
+  Case-insensitive search across `customerName`, `customerIdentity`, and linked `dispenserId` values.
+</ParamField>
+
+### Response fields
+
+<ResponseField name="(root)" type="MaintenanceApproval[]">
+  Array of approval objects. Each object contains:
+</ResponseField>
+
+<ResponseField name="id" type="string">
+  Approval ID (CUID).
+</ResponseField>
+
+<ResponseField name="customerName" type="string | null">
+  Name of the customer representative who signed.
+</ResponseField>
+
+<ResponseField name="customerIdentity" type="string | null">
+  DNI or identification number of the signer.
+</ResponseField>
+
+<ResponseField name="signatureHash" type="string | null">
+  SHA-512 hex digest (128 characters) of the signature payload.
+</ResponseField>
+
+<ResponseField name="signedAt" type="string | null">
+  ISO 8601 timestamp of the signing event.
+</ResponseField>
+
+<ResponseField name="technician" type="object">
+  Technician who created the approval: `nombre`, `email`.
+</ResponseField>
+
+<ResponseField name="schedules" type="MaintenanceSchedule[]">
+  Associated schedules, each with the full dispenser and location tree.
+</ResponseField>
+
+<ResponseField name="createdAt" type="string">
+  ISO 8601 creation timestamp.
+</ResponseField>
+
+### Example
+
+```bash
+curl -X GET "https://your-domain.com/api/maintenance/approvals?plantId=plant-abc&startDate=2024-06-01" \
+  -H "Cookie: sb-access-token=<token>"
+```
+
+```json
+[
+  {
+    "id": "approval-xyz",
+    "customerName": "María Rodríguez",
+    "customerIdentity": "28345678",
+    "signatureHash": "a3f9b2c1...",
+    "signedAt": "2024-06-15T11:30:00.000Z",
+    "createdAt": "2024-06-15T11:00:00.000Z",
+    "technician": {
+      "nombre": "Carlos López",
+      "email": "carlos@empresa.com"
+    },
+    "schedules": [
+      {
+        "id": "maint-sched-001",
+        "dispenserId": "DISP-042",
+        "scheduledMonth": "2024-06",
+        "status": "SIGNED",
+        "dispenser": {
+          "id": "DISP-042",
+          "marca": "Acuaservice",
+          "modelo": "Pro 600",
+          "location": {
+            "nombre": "Comedor",
+            "plant": { "nombre": "Planta Norte" }
+          }
+        }
+      }
+    ]
+  }
+]
+```
+
+### Error cases
+
+| Status | Description |
+|--------|-------------|
+| `401`  | Missing or invalid authentication session. |
+| `403`  | Caller lacks `maintenance:read`. |
+
+---
+
+## POST /api/maintenance/approvals/\{id\}/verify
+
+Verifies the cryptographic integrity of a maintenance approval signature. The endpoint retrieves the stored `encryptedHash` and `hashPayload`, passes them to the `verifySignature` utility (SHA-512 + AES-256-GCM), and returns the verification result.
+
+This endpoint requires `maintenance:read` permission to prevent unauthenticated enumeration.
+
+**Required permission:** `maintenance:read`
+
+<Tip>
+  This endpoint is designed to support quick digital signature checks from the approvals list. The `valid` flag tells the caller whether the signature payload was cryptographically intact and untampered.
+</Tip>
+
+### Request body
+
+This endpoint does not accept a request body. The approval is identified by `{id}` in the URL path.
+
+### Response fields
+
+<ResponseField name="valid" type="boolean">
+  `true` if the signature cryptographically matches the stored payload; `false` if it has been tampered with or cannot be verified.
+</ResponseField>
+
+<ResponseField name="signedAt" type="string | null">
+  ISO 8601 timestamp of the original signing event, sourced from the verified payload.
+</ResponseField>
+
+<ResponseField name="customerName" type="string | null">
+  Name of the customer signer, sourced from the verified payload.
+</ResponseField>
+
+### Example
+
+```bash
+curl -X POST "https://your-domain.com/api/maintenance/approvals/approval-xyz/verify" \
+  -H "Cookie: sb-access-token=<token>"
+```
+
+```json
+{
+  "valid": true,
+  "signedAt": "2024-06-15T11:30:00.000Z",
+  "customerName": "María Rodríguez"
+}
+```
+
+### Error cases
+
+| Status | Description |
+|--------|-------------|
+| `400`  | The approval exists but does not have a valid digital certificate (missing `signatureHash`, `encryptedHash`, or `hashPayload`). |
+| `401`  | Missing or invalid authentication session. |
+| `403`  | Caller lacks `maintenance:read`. |
+| `404`  | No approval found with the given ID. |

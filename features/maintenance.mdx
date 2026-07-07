@@ -1,0 +1,225 @@
+---
+title: "Preventive Maintenance Scheduling and Digital Approvals"
+sidebarTitle: "Maintenance"
+description: "HDB Service auto-generates monthly maintenance schedules for every in-service dispenser, collects digital checklists, and captures cryptographically-signed customer approvals."
+---
+
+The maintenance module provides a structured, auditable workflow for preventive maintenance across the entire water dispenser fleet. Every month, HDB Service generates one schedule per active dispenser, technicians submit digital checklists with photos and condition ratings, and customers sign off on completed visits using a cryptographically-secured digital signature. The complete chain of evidence — from schedule creation through to signed approval — is stored and verifiable at any time.
+
+## Schedule generation
+
+Monthly maintenance schedules are created either automatically by a cron job or on demand by calling `POST /api/maintenance/generate`.
+
+```json
+// POST /api/maintenance/generate
+{
+  "month": "2025-07"
+}
+```
+
+The `month` field must follow the `YYYY-MM` format. The endpoint queries all dispensers whose `status` is `IN_SERVICE`, `BACKUP`, `UNDER_REPAIR`, or `IN_TECHNICAL_SERVICE` (i.e., any dispenser that is still in the fleet), then creates a `MaintenanceSchedule` record for each one — unless a record for that `(dispenserId, scheduledMonth)` pair already exists.
+
+This **upsert pattern** (check-then-create on the unique composite index `@@unique([dispenserId, scheduledMonth])`) guarantees that running the generator multiple times for the same month is fully idempotent — no duplicate schedules are ever created. The response reports how many records were `created` vs. `skipped`.
+
+```json
+// Example response
+{
+  "success": true,
+  "message": "Mantenimiento generado: 48 creados, 2 ya existían.",
+  "created": 48,
+  "skipped": 2
+}
+```
+
+A `MaintenanceSchedule` record carries the following statuses:
+
+<CardGroup cols={2}>
+  <Card title="PENDING" icon="clock">
+    The schedule has been generated but no checklist has been submitted yet. The default state on creation.
+  </Card>
+  <Card title="COMPLETED" icon="circle-check">
+    A checklist has been submitted and accepted. The schedule may be linked to a `MaintenanceApproval` group for customer sign-off.
+  </Card>
+  <Card title="OVERDUE" icon="triangle-exclamation">
+    The scheduled month has passed and the visit was not completed. Set by the daily cron job when `scheduledMonth` is in the past and status is still `PENDING`.
+  </Card>
+  <Card title="EXPIRED" icon="ban">
+    The grace period has closed and the schedule can no longer be completed. Used for archival/reporting purposes.
+  </Card>
+  <Card title="SIGNED" icon="file-signature">
+    A completed schedule that has been included in a `MaintenanceApproval` and signed by the customer.
+  </Card>
+</CardGroup>
+
+---
+
+## Overdue and expiry
+
+The daily cron job scans all `MaintenanceSchedule` records and applies two escalation rules:
+
+1. **PENDING → OVERDUE** — Any schedule whose `scheduledMonth` represents a month that has already ended and whose status is still `PENDING` is marked `OVERDUE`. This surfaces missed visits on the dashboard and in reports.
+2. **OVERDUE → EXPIRED** — Schedules that remain pending even further into the future (past a system-defined grace period) are transitioned to `EXPIRED` and removed from the active workload view.
+
+<Warning>
+  An `EXPIRED` schedule cannot be completed retroactively. If a visit was genuinely performed late, it should be documented via a corrective maintenance ticket instead.
+</Warning>
+
+---
+
+## Maintenance checklist
+
+When a technician visits a dispenser, they submit a checklist via `POST /api/maintenance/[id]/checklist`. A schedule can only have **one checklist** — submitting twice returns `400 Bad Request`.
+
+```json
+// POST /api/maintenance/:scheduleId/checklist
+{
+  "condicionGeneral": "FAIR",
+  "fallas": ["Presión baja", "Filtro colmatado"],
+  "problemasEstructurales": [],
+  "observaciones": "Se reemplazó filtro de carbón. Equipo operativo.",
+  "consumablesUsed": [
+    {
+      "type": "BULK",
+      "materialCode": "FILTER-CARB-01",
+      "nombre": "Filtro de carbón activado",
+      "cantidad": 1
+    }
+  ]
+}
+```
+
+The `MaintenanceChecklist` model fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `condicionGeneral` | `ConditionRating` | Overall condition: `GOOD`, `FAIR`, `POOR`, or `CRITICAL`. **Required.** |
+| `fallas` | `Json?` | JSON string array of detected operational failures (e.g., `["Presión baja"]`). |
+| `problemasEstructurales` | `Json?` | JSON string array of structural issues found during inspection. |
+| `observaciones` | `String?` | Free-text technician notes. |
+| `fotosUrls` | `Json?` | JSON array of photo URLs or base64-encoded images uploaded during the visit. |
+| `completedById` | `String` | The technician who submitted the checklist. |
+| `completedAt` | `DateTime` | Timestamp of submission. |
+
+Checklist submission is processed inside a **database transaction** that also handles consumable stock deduction. For each item in `consumablesUsed`:
+
+- **Serialized consumables** (`type: "SERIALIZED"`) — the specific `Consumable` record is marked inactive and the plant's aggregate `StockEntry` is decremented by 1.
+- **Bulk materials** (`type: "BULK"`) — the plant's `StockEntry` quantity is decremented by `cantidad`. If there is insufficient stock, the entire transaction is rolled back and a descriptive error is returned.
+
+After the checklist is saved, the schedule's `status` is automatically advanced to `COMPLETED`.
+
+<Note>
+  The `consumablesUsed` array in the checklist payload directly drives `DispenserConsumableHistory` — previous open records for the same `materialCode` are closed (`removedAt = now()`) and new records are created with a calculated `expiresAt` based on `MaterialCatalog.expirationMonths`.
+</Note>
+
+---
+
+## Digital approval signatures
+
+Once one or more maintenance visits are completed, a technician groups them into a `MaintenanceApproval` and presents it to the customer for signature. The approval flow is:
+
+<Steps>
+  <Step title="Create approval intent">
+    Call `POST /api/maintenance/approvals` with a `scheduleIds` array. All referenced schedules must have `status = COMPLETED`. An empty `MaintenanceApproval` record is created and linked to those schedules. The response returns the `id` of the approval.
+
+    ```json
+    // POST /api/maintenance/approvals
+    {
+      "scheduleIds": ["sched_abc", "sched_def"]
+    }
+    ```
+  </Step>
+  <Step title="Customer signs">
+    The customer fills in their name, identity (DNI), and draws their signature on the digital pad. The signature image is captured as a base64 string (`signatureData`).
+  </Step>
+  <Step title="Cryptographic signing">
+    The system builds a deterministic payload from: sorted dispenser IDs, exact timestamp, device info, technician ID, customer name, and customer identity. This payload is hashed with **SHA-512** (`signatureHash`) and then the hash is encrypted with **AES-256-GCM** (`encryptedHash`). Both the raw payload (`hashPayload`), the hash, and the encrypted hash are stored.
+  </Step>
+  <Step title="Audit fields recorded">
+    `signedAt` (exact moment of signature), `ipAddress` (signer's IP), and `deviceInfo` (user-agent / device fingerprint) are persisted for the legal audit trail.
+  </Step>
+</Steps>
+
+The complete `MaintenanceApproval` record:
+
+| Field | Description |
+|---|---|
+| `customerName` | Full name of the signing customer representative. |
+| `customerIdentity` | DNI or national ID number. |
+| `signatureData` | Base64-encoded PNG of the handwritten signature. |
+| `signatureHash` | SHA-512 hex digest (128 characters) of the audit payload. |
+| `encryptedHash` | AES-256-GCM encrypted form of `signatureHash`, stored as `base64(iv):base64(authTag):base64(ciphertext)`. |
+| `hashPayload` | The raw string used to produce the hash (stored for re-verification). |
+| `signedAt` | Exact timestamp of signing. |
+| `ipAddress` | IPv4/IPv6 address of the signer's device. |
+| `deviceInfo` | Browser user-agent or device fingerprint string. |
+| `technicianId` | The technician who initiated the approval. |
+
+---
+
+## Signature verification
+
+Any stored approval can be cryptographically verified — without requiring re-entry of any data — by calling `POST /api/maintenance/approvals/[id]/verify`. The endpoint is authenticated (requires `maintenance:read`) but is otherwise read-only and non-destructive.
+
+```bash
+POST /api/maintenance/approvals/approval_xyz123/verify
+```
+
+The verification process:
+
+1. Retrieve the stored `encryptedHash` and `hashPayload` for the approval.
+2. **Decrypt** `encryptedHash` using the server's AES-256-GCM key to recover the original SHA-512 hash.
+3. **Recompute** SHA-512 from the stored `hashPayload`.
+4. **Compare** both hashes using a timing-safe equality check (`crypto.timingSafeEqual`) to prevent timing-based attacks.
+
+The response indicates whether the signature is valid and untampered:
+
+```json
+{
+  "valid": true,
+  "hash": "a3f2c1...",       // decrypted hash
+  "computedHash": "a3f2c1..."  // recomputed hash
+}
+```
+
+If `valid` is `false`, the approval record has been tampered with after signing and should be treated as compromised.
+
+<Warning>
+  An approval without `signatureHash`, `encryptedHash`, or `hashPayload` (i.e., one that was never fully signed) will return `400 Bad Request` from the verify endpoint with the message "Esta firma no tiene certificado digital válido".
+</Warning>
+
+---
+
+## Maintenance reports
+
+Completed and signed maintenance data can be exported to a PDF report via `POST /api/dashboard/pdf`. The PDF is generated server-side using `@react-pdf/renderer` and streamed directly to the client as an attachment.
+
+```bash
+POST /api/dashboard/pdf
+Content-Type: application/json
+
+{
+  "type": "salud",
+  "filters": { "clientId": "client_abc", "plantId": "plant_xyz" },
+  "data": { ... }
+}
+```
+
+The `type` field controls the report template:
+
+- **`performance`** — Operational performance report, including SLA, MTTR, and MTBF KPIs.
+- **`salud`** — Fleet health report, including dispenser health scores, distribution (óptimo / estable / crítico), and a top-10 ranking.
+
+The generated file is returned with `Content-Type: application/pdf` and `Content-Disposition: attachment; filename="Reporte_<type>.pdf"`.
+
+<Tip>
+  Health score is a composite metric that weighs MTBF (40%), MTTR (20%), recurrence rate (20%), inspected condition rating (10%), and theoretical lifecycle progress (10%).
+</Tip>
+
+---
+
+## Required permissions
+
+| Permission | Roles |
+|---|---|
+| `maintenance:read` | ADMIN, SUPERVISOR, TECHNICIAN, CLIENT_RESPONSIBLE, CLIENT_REQUESTER |
+| `maintenance:write` | ADMIN, SUPERVISOR, TECHNICIAN |

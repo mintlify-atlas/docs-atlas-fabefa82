@@ -1,0 +1,385 @@
+---
+title: "Dashboard API Endpoints — Stats, Analytics, and Reports"
+sidebarTitle: "Dashboard"
+description: "REST API reference for the analytics dashboard: summary stats, time-series analytics, technician performance metrics, fleet health breakdown, and PDF report generation."
+---
+
+The Dashboard API surfaces aggregated, role-aware analytics over the entire HDB Service fleet. All endpoints enforce the `dashboard:read` permission so data is automatically scoped to what the authenticated user is allowed to see: `ADMIN` and `SUPERVISOR` users can query across all clients and plants; `TECHNICIAN` users see only tickets assigned to them; `CLIENT_RESPONSIBLE` users see only data for their own client; `CLIENT_REQUESTER` users see their own reported tickets plus their assigned plants. Passing an optional `plantId` query parameter further narrows results to a single plant.
+
+The five endpoints below cover progressively deeper layers of analysis — from a one-screen operational summary all the way to a downloadable PDF maintenance report.
+
+---
+
+## GET /api/dashboard
+
+Returns a high-level operational summary for the authenticated user. All counts are computed in parallel using `Promise.all` to minimize latency. SLA compliance is calculated using the shared `calculateSlaCompliance` utility, which measures the proportion of resolved tickets that met their resolution deadline.
+
+**Required permission:** `dashboard:read`
+
+<ParamField query="plantId" type="string">
+  Restrict all counts to a specific plant. Non-admin/supervisor users are blocked from querying plants they do not have access to.
+</ParamField>
+
+<ResponseField name="user" type="object">
+  <Expandable title="user fields">
+    <ResponseField name="nombre" type="string">Authenticated user's first name.</ResponseField>
+    <ResponseField name="role" type="string">Authenticated user's role.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="tickets" type="object">
+  <Expandable title="tickets fields">
+    <ResponseField name="open" type="number">Count of tickets with status `OPEN` or `IN_PROGRESS`.</ResponseField>
+    <ResponseField name="total" type="number">Total ticket count in scope.</ResponseField>
+    <ResponseField name="slaCompliance" type="number">SLA compliance percentage (0–100).</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="dispensers" type="object">
+  <Expandable title="dispensers fields">
+    <ResponseField name="total" type="number">Total active dispensers in scope.</ResponseField>
+    <ResponseField name="inService" type="number">Dispensers with status `IN_SERVICE`.</ResponseField>
+    <ResponseField name="repair" type="number">Dispensers with status `UNDER_REPAIR`.</ResponseField>
+    <ResponseField name="blocked" type="number">Dispensers with status `BLOCKED`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="stock" type="object">
+  <Expandable title="stock fields">
+    <ResponseField name="lowAlerts" type="number">Count of stock entries where `minLevel > 0` and `cantidad < minLevel`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="maintenance" type="object">
+  <Expandable title="maintenance fields">
+    <ResponseField name="pending" type="number">Count of maintenance schedules with status `PENDING`.</ResponseField>
+    <ResponseField name="overdue" type="number">Count of maintenance schedules with status `OVERDUE`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+```bash
+curl -X GET "https://your-domain.com/api/dashboard?plantId=plant_xyz" \
+  -H "Cookie: sb-access-token=<token>"
+```
+
+**Example response:**
+
+```json
+{
+  "user": { "nombre": "Carlos", "role": "SUPERVISOR" },
+  "tickets": { "open": 5, "total": 120, "slaCompliance": 94 },
+  "dispensers": { "total": 48, "inService": 40, "repair": 3, "blocked": 1 },
+  "stock": { "lowAlerts": 2 },
+  "maintenance": { "pending": 12, "overdue": 1 }
+}
+```
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `403` | Non-admin user requested a `plantId` they do not have access to. |
+| `401` | Not authenticated. |
+| `403` | Insufficient permission (`dashboard:read` required). |
+| `500` | Internal server error. |
+
+---
+
+## GET /api/dashboard/analytics
+
+Returns deep analytical KPIs and fleet health data. This endpoint queries tickets, repair histories, maintenance checklists, and dispenser records simultaneously to compute: SLA (average hours from ticket creation to first technical action), MTTR (mean time to repair in hours), MTBF (mean time between failures in days), top failure modes extracted from maintenance checklist `fallas` arrays, and a health score for each dispenser. Dispenser health is scored 0–100 using a weighted algorithm that considers MTBF, MTTR, repair recurrences, average condition rating from checklists, and lifecycle progress.
+
+**Required permission:** `dashboard:read`
+
+<ParamField query="clientId" type="string">Filter to a specific client.</ParamField>
+<ParamField query="plantId" type="string">Filter to a specific plant.</ParamField>
+<ParamField query="sectorId" type="string">Filter to a specific sector.</ParamField>
+<ParamField query="dispenserId" type="string">Filter to a single dispenser.</ParamField>
+
+<ResponseField name="kpis" type="object">
+  <Expandable title="kpis fields">
+    <ResponseField name="sla" type="number">Average SLA in hours (time from ticket creation to first repair action).</ResponseField>
+    <ResponseField name="mttr" type="number">Average MTTR in hours (time from ticket creation to resolution).</ResponseField>
+    <ResponseField name="mtbf" type="number">Average MTBF in days (average time between consecutive failures per dispenser).</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="failures" type="object">
+  <Expandable title="failures fields">
+    <ResponseField name="top" type="array">
+      Top 5 most frequent failure modes. Each entry includes:
+      - `name` (string): failure label from the checklist.
+      - `count` (number): total occurrences.
+      - `avgRepairTime` (number): average repair time in hours.
+      - `severity` (string): `HIGH` or `MEDIUM`.
+    </ResponseField>
+    <ResponseField name="totalReported" type="number">Total distinct failure types observed in scope.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="health" type="object">
+  <Expandable title="health fields">
+    <ResponseField name="ranking" type="array">
+      Up to 10 worst-scoring dispensers, sorted ascending by score. Each entry includes `id`, `marca`, `modelo`, `score` (0–100), and `status` (`BUENO`, `MEDIO`, or `MALO`).
+    </ResponseField>
+    <ResponseField name="distribution" type="object">
+      <Expandable title="distribution fields">
+        <ResponseField name="bueno" type="number">Count of dispensers with `score > 80`.</ResponseField>
+        <ResponseField name="medio" type="number">Count of dispensers with `score` between 50 and 80.</ResponseField>
+        <ResponseField name="malo" type="number">Count of dispensers with `score < 50`.</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+```bash
+curl -X GET "https://your-domain.com/api/dashboard/analytics?plantId=plant_xyz" \
+  -H "Cookie: sb-access-token=<token>"
+```
+
+<Note>
+  All KPI values are rounded to one decimal place. If no resolved tickets exist in scope, `sla` and `mttr` return `0`. If a dispenser has had only one repair event, its MTBF contribution is excluded (at least two repair events are needed to measure a gap).
+</Note>
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `401` | Not authenticated. |
+| `403` | Insufficient permission (`dashboard:read` required). |
+| `500` | Internal server error computing analytics. |
+
+---
+
+## GET /api/dashboard/performance
+
+Returns time-series performance KPIs over the past 6 months, broken down by calendar month. In addition to the three global KPIs (SLA, MTTR, MTBF), this endpoint provides a month-by-month `timeline` array and a ranked list of the top 10 failure modes. An optional `failureName` filter restricts the KPI and timeline calculations to tickets related to a specific failure type (matched by cross-referencing the ticket's dispenser and creation time against maintenance checklist records within a ±7-day window).
+
+**Required permission:** `dashboard:read`
+
+<ParamField query="clientId" type="string">Filter to a specific client.</ParamField>
+<ParamField query="plantId" type="string">Filter to a specific plant.</ParamField>
+<ParamField query="failureName" type="string">
+  Filter KPIs and timeline to tickets associated with a specific failure mode name (matched against maintenance checklist `fallas` arrays).
+</ParamField>
+
+<ResponseField name="kpis" type="object">
+  <Expandable title="kpis fields">
+    <ResponseField name="sla" type="number">Average SLA in hours over the full period.</ResponseField>
+    <ResponseField name="mttr" type="number">Average MTTR in hours over the full period.</ResponseField>
+    <ResponseField name="mtbf" type="number">Average MTBF in days over the full period.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="failures" type="array">
+  Top 10 failure modes sorted by frequency. Each entry includes `name`, `count`, `avgRepairTime` (hours), and `severity` (`HIGH` or `MEDIUM`).
+</ResponseField>
+
+<ResponseField name="timeline" type="array">
+  Six entries, one per calendar month (oldest first). Each entry:
+  - `month` (string): short month + year label (e.g., `"Jan 2025"`).
+  - `sla` (number): average SLA hours for that month (`0` if no data).
+  - `mttr` (number): average MTTR hours for that month (`0` if no data).
+</ResponseField>
+
+```bash
+curl -X GET "https://your-domain.com/api/dashboard/performance?plantId=plant_xyz&failureName=Filtro+tapado" \
+  -H "Cookie: sb-access-token=<token>"
+```
+
+**Example response:**
+
+```json
+{
+  "kpis": { "sla": 3.2, "mttr": 7.8, "mtbf": 45.0 },
+  "failures": [
+    { "name": "Filtro tapado", "count": 14, "avgRepairTime": 2.5, "severity": "MEDIUM" },
+    { "name": "Pérdida de agua", "count": 8, "avgRepairTime": 5.1, "severity": "HIGH" }
+  ],
+  "timeline": [
+    { "month": "Jan 2025", "sla": 4.1, "mttr": 9.2 },
+    { "month": "Feb 2025", "sla": 3.8, "mttr": 8.0 },
+    { "month": "Mar 2025", "sla": 2.9, "mttr": 6.5 },
+    { "month": "Apr 2025", "sla": 3.0, "mttr": 7.1 },
+    { "month": "May 2025", "sla": 2.7, "mttr": 6.8 },
+    { "month": "Jun 2025", "sla": 3.2, "mttr": 7.8 }
+  ]
+}
+```
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `401` | Not authenticated. |
+| `403` | Insufficient permission (`dashboard:read` required). |
+| `500` | Internal server error computing performance data. |
+
+---
+
+## GET /api/dashboard/salud
+
+Returns a detailed per-dispenser health ranking for the entire fleet (or a scoped subset). Each dispenser receives a composite health score (0–100) computed using a weighted algorithm: MTBF contributes 40%, MTTR 20%, repair recurrences in the last 180 days 20%, average general condition rating from maintenance checklists 10%, and lifecycle age progress 10%. Dispensers are returned sorted worst-first. The response is cached with `s-maxage=300` (5 minutes) and `stale-while-revalidate=60`.
+
+**Required permission:** `dashboard:read`
+
+<ParamField query="clientId" type="string">Filter to a specific client.</ParamField>
+<ParamField query="plantId" type="string">Filter to a specific plant.</ParamField>
+
+<ResponseField name="ranking" type="array">
+  All in-scope dispensers sorted ascending by health score (worst first). Each entry includes:
+
+  <Expandable title="ranking entry fields">
+    <ResponseField name="id" type="string">Dispenser ID.</ResponseField>
+    <ResponseField name="marca" type="string">Brand.</ResponseField>
+    <ResponseField name="modelo" type="string">Model.</ResponseField>
+    <ResponseField name="serial" type="string">Serial number, or `"S/N"` if not set.</ResponseField>
+    <ResponseField name="planta" type="string">Current plant name (and sector if assigned), or `"Sin Planta"`.</ResponseField>
+    <ResponseField name="score" type="number">Composite health score 0–100.</ResponseField>
+    <ResponseField name="status" type="string">`ÓPTIMO` (score > 80), `ESTABLE` (score 50–80), or `CRÍTICO` (score < 50).</ResponseField>
+    <ResponseField name="details" type="object">
+      <Expandable title="details fields">
+        <ResponseField name="ownerPlantId" type="string">Plant that owns the dispenser (nullable).</ResponseField>
+        <ResponseField name="currentPlantId" type="string">Plant where the dispenser is currently located (nullable).</ResponseField>
+        <ResponseField name="mtbfDays" type="number">Average time between failures in days.</ResponseField>
+        <ResponseField name="mtbfMonths" type="number">Average time between failures in months (rounded to 1 decimal).</ResponseField>
+        <ResponseField name="mttrHours" type="number">Average time to repair in hours (rounded to 1 decimal).</ResponseField>
+        <ResponseField name="recurrences" type="number">Number of repair events in the last 180 days.</ResponseField>
+        <ResponseField name="condition" type="number">Average condition rating from maintenance checklists (0–100).</ResponseField>
+        <ResponseField name="progress" type="number">Lifecycle age progress as a percentage (0–100).</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="timeline" type="array">
+  6-month trend of the fleet's global average health score. Each entry has `month` (short Spanish month name) and `score` (number, 0–100).
+</ResponseField>
+
+<ResponseField name="distribution" type="object">
+  <Expandable title="distribution fields">
+    <ResponseField name="optimo" type="number">Count of dispensers with `ÓPTIMO` status.</ResponseField>
+    <ResponseField name="estable" type="number">Count of dispensers with `ESTABLE` status.</ResponseField>
+    <ResponseField name="critico" type="number">Count of dispensers with `CRÍTICO` status.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+```bash
+curl -X GET "https://your-domain.com/api/dashboard/salud?plantId=plant_xyz" \
+  -H "Cookie: sb-access-token=<token>"
+```
+
+**Example response:**
+
+```json
+{
+  "ranking": [
+    {
+      "id": "DISP-007",
+      "marca": "Hidrobest",
+      "modelo": "HB-500",
+      "serial": "SN-20191234",
+      "planta": "Planta Norte - Administración",
+      "score": 38,
+      "status": "CRÍTICO",
+      "details": {
+        "ownerPlantId": "plant_xyz",
+        "currentPlantId": "plant_xyz",
+        "mtbfDays": 22,
+        "mtbfMonths": 0.7,
+        "mttrHours": 14.2,
+        "recurrences": 4,
+        "condition": 55,
+        "progress": 82
+      }
+    }
+  ],
+  "timeline": [
+    { "month": "Ene", "score": 74 },
+    { "month": "Feb", "score": 72 },
+    { "month": "Mar", "score": 70 },
+    { "month": "Abr", "score": 71 },
+    { "month": "May", "score": 69 },
+    { "month": "Jun", "score": 68 }
+  ],
+  "distribution": { "optimo": 32, "estable": 12, "critico": 4 }
+}
+```
+
+<Tip>
+  Use the `details.recurrences` and `details.mtbfMonths` fields together to identify dispensers that fail frequently AND take a long time to fix — these are prime candidates for preventive replacement.
+</Tip>
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `403` | Non-admin user requested a `plantId` or `clientId` they do not have access to. |
+| `401` | Not authenticated. |
+| `403` | Insufficient permission (`dashboard:read` required). |
+| `500` | Internal server error. |
+
+---
+
+## POST /api/dashboard/pdf
+
+Generates and returns a PDF maintenance report as a binary file stream. The PDF is rendered server-side using `@react-pdf/renderer`. The report layout varies by `type`: `performance` reports display SLA, MTTR, and MTBF KPIs plus a top-failures table; `salud` reports display the fleet health distribution and a ranked dispenser table (top 10 worst). Applied filter labels are printed in the report header. The binary response should be downloaded directly, not parsed as JSON.
+
+**Required permission:** `reports:generate`
+
+<Note>
+  This endpoint accepts a `POST` request. The analytics data to render must be fetched separately from `/api/dashboard/analytics` or `/api/dashboard/salud` and passed in the `data` field of the request body.
+</Note>
+
+<ParamField body="type" type="string" required>
+  Report type. One of `performance` (renders KPIs and failure analysis) or `salud` (renders fleet health distribution and dispenser ranking).
+</ParamField>
+
+<ParamField body="filters" type="object">
+  Filters to display in the report header.
+  <Expandable title="filters fields">
+    <ParamField body="clientId" type="string">Client ID label shown in the report.</ParamField>
+    <ParamField body="plantId" type="string">Plant ID label shown in the report.</ParamField>
+    <ParamField body="failureName" type="string">Failure filter label shown in the report.</ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="data" type="object" required>
+  The analytics payload to render. For `type: "performance"`, pass the response from `GET /api/dashboard/performance`. For `type: "salud"`, pass the response from `GET /api/dashboard/salud`.
+</ParamField>
+
+The successful response is a binary PDF file stream with the following headers:
+
+| Header | Value |
+|--------|-------|
+| `Content-Type` | `application/pdf` |
+| `Content-Disposition` | `attachment; filename="Reporte_<type>.pdf"` |
+
+```bash
+# 1. Fetch the data first
+DATA=$(curl -s "https://your-domain.com/api/dashboard/salud?plantId=plant_xyz" \
+  -H "Cookie: sb-access-token=<token>")
+
+# 2. POST to the PDF endpoint and save the file
+curl -X POST "https://your-domain.com/api/dashboard/pdf" \
+  -H "Content-Type: application/json" \
+  -H "Cookie: sb-access-token=<token>" \
+  -o "Reporte_salud.pdf" \
+  -d "{
+    \"type\": \"salud\",
+    \"filters\": { \"plantId\": \"plant_xyz\" },
+    \"data\": $DATA
+  }"
+```
+
+<Warning>
+  The PDF endpoint does **not** fetch data from the database itself — you must pass pre-fetched analytics data in the `data` field. Passing incomplete or malformed data will result in sections of the report showing "No hay datos para mostrar."
+</Warning>
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `401` | Not authenticated. |
+| `403` | Insufficient permission (`reports:generate` required). |
+| `500` | PDF rendering failed (plain text error response, not JSON). |
