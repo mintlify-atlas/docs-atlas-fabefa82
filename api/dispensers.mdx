@@ -280,15 +280,11 @@ curl -X GET "https://your-domain.com/api/dispensers/DISP-042" \
 
 ---
 
-## PATCH /api/dispensers/\{id\}
+## PUT /api/dispensers/\{id\}
 
 Updates editable metadata fields on an existing dispenser. Only provided fields are changed; all others are left untouched. An `ADMIN` user may additionally set `lifecycleStartDate` if it has not been set yet.
 
 **Required permission:** `dispensers:write`
-
-<Note>
-  This endpoint also accepts `PUT`. `PATCH` and `PUT` are equivalent.
-</Note>
 
 ### Request body
 
@@ -320,10 +316,18 @@ Updates editable metadata fields on an existing dispenser. Only provided fields 
   Transfer ownership to a different plant. Pass `null` to clear ownership.
 </ParamField>
 
+<ParamField body="active" type="boolean">
+  Set to `false` to soft-delete the dispenser record.
+</ParamField>
+
+<ParamField body="lifecycleStartDate" type="string">
+  ISO 8601 date to manually set the lifecycle start. **Admin-only** and only applies when the lifecycle has not yet been started (i.e. `lifecycleStartDate` is currently `null`). Pass `null` to clear.
+</ParamField>
+
 ### Example
 
 ```bash
-curl -X PATCH "https://your-domain.com/api/dispensers/DISP-042" \
+curl -X PUT "https://your-domain.com/api/dispensers/DISP-042" \
   -H "Cookie: sb-access-token=<token>" \
   -H "Content-Type: application/json" \
   -d '{

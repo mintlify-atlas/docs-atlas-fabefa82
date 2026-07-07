@@ -88,11 +88,11 @@ GET /api/tickets?page=2&limit=25
 
 ## Idempotency
 
-`POST` endpoints support idempotent retries through an idempotency key mechanism implemented in `lib/idempotency.ts`. To use it, include an `Idempotency-Key` header containing a UUID with your request. If the server has already processed a request with that key and it succeeded, it will return the cached response immediately without re-executing the handler — preventing duplicate records or double side effects on network retries.
+`POST` endpoints support idempotent retries through an idempotency key mechanism implemented in `lib/idempotency.ts`. To use it, include an `X-Idempotency-Key` header containing a UUID with your request. If the server has already processed a request with that key and it succeeded, it will return the cached response immediately without re-executing the handler — preventing duplicate records or double side effects on network retries.
 
 ```bash
 curl -X POST https://your-deployment.vercel.app/api/tickets \
-  -H "Idempotency-Key: f47ac10b-58cc-4372-a567-0e02b2c3d479" \
+  -H "X-Idempotency-Key: f47ac10b-58cc-4372-a567-0e02b2c3d479" \
   -H "Content-Type: application/json" \
   -d '{ "reason": "Equipo sin agua", "dispenserId": "disp_abc" }'
 ```
@@ -102,7 +102,7 @@ curl -X POST https://your-deployment.vercel.app/api/tickets \
 1. On receiving a `POST`, the server checks `prisma.idempotencyKey` for an existing record matching the key.
 2. If found, the cached response JSON is returned immediately with `200 OK`.
 3. If not found, the handler executes normally. On success, the response body is stored against the key in the database.
-4. If no `Idempotency-Key` header is provided, the request is processed normally with no deduplication.
+4. If no `X-Idempotency-Key` header is provided, the request is processed normally with no deduplication.
 
 <Tip>
   Generate a fresh UUID (e.g., `crypto.randomUUID()` in JavaScript or `uuid.uuid4()` in Python) for each _logical_ operation. Reuse the same key only when retrying the exact same request.

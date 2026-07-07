@@ -1,7 +1,7 @@
 ---
-title: "Roles and Permissions in HDB Service"
+title: "Roles and Permissions Reference for HDB Service RBAC"
 sidebarTitle: "Roles & Permissions"
-description: "HDB Service uses five roles — ADMIN, SUPERVISOR, TECHNICIAN, CLIENT_RESPONSIBLE, CLIENT_REQUESTER — each with a distinct permission set enforced at every API route."
+description: "HDB Service defines five roles — ADMIN, SUPERVISOR, TECHNICIAN, CLIENT_RESPONSIBLE, and CLIENT_REQUESTER — each enforced at every API route."
 ---
 
 HDB Service implements a **Role-Based Access Control (RBAC)** model defined in `lib/rbac.ts`. Every user is assigned exactly one of five roles. When an API route is called, `requirePermission()` in `lib/auth.ts` checks the caller's role against the required permission before any business logic runs — returning `401` for unauthenticated requests and `403` for insufficient permissions. The permission matrix is static and compiled into the server, so there is no per-user permission customization outside of role assignment.

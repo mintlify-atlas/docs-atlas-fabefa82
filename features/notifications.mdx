@@ -1,7 +1,7 @@
 ---
 title: "Notifications: Push Alerts and In-App Messages"
 sidebarTitle: "Notifications"
-description: "HDB Service delivers real-time notifications via OneSignal push and Nodemailer email for ticket events, SLA breaches, maintenance schedules, and low-stock alerts."
+description: "Push, email, and in-app alerts for ticket events, SLA breaches, maintenance due dates, low-stock conditions, and inter-plant debt creation in HDB Service."
 ---
 
 HDB Service operates a multi-channel notification system that keeps every stakeholder informed in real time. When a ticket is assigned, an SLA deadline is at risk, a maintenance visit is due, or stock falls below its minimum level, the platform fires targeted alerts through up to three channels simultaneously: **OneSignal push notifications** to the user's registered device, **Nodemailer transactional email** rendered from a database-stored template, and a persistent **in-app notification** stored in PostgreSQL and surfaced through the notifications API. All three channels are triggered by the same backend events, so no alert is silently dropped if one channel is unavailable.
@@ -135,6 +135,7 @@ SMTP settings are stored as `SystemSetting` records in the database under the fo
 | `SMTP_PASS` | SMTP authentication password. |
 | `SMTP_FROM_NAME` | Sender display name (defaults to `HDB Service`). |
 | `SMTP_FROM_EMAIL` | Sender email address (defaults to `SMTP_USER`). |
+| `SMTP_SECURE` | Optional override for TLS mode. When absent, the server sets `secure: true` automatically for port `465` and `false` for all other ports. |
 
 <Note>
   If `SMTP_HOST`, `SMTP_USER`, or `SMTP_PASS` are missing from the database settings, the email is silently skipped with a console warning. The triggering operation still completes.

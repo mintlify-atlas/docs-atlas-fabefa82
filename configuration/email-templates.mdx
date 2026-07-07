@@ -26,9 +26,9 @@ model EmailTemplate {
 | Field | Description |
 |---|---|
 | `type` | Unique string key that identifies the template. The application looks up templates by this value. |
-| `subject` | Email subject line. Supports the same `{{variable}}` placeholders as the body. |
+| `subject` | Email subject line. Supports the same `{variable}` placeholders as the body. |
 | `body` | Full email body. Supports HTML and plain text. Newlines are converted to `<br />` tags at send time. |
-| `active` | When `false`, `sendEmail` skips the template and no email is sent. |
+| `active` | Stored flag indicating whether the template is considered active. Toggled via the `PUT` endpoint; not evaluated by `sendEmail` at send time. |
 
 Templates are managed through the following API endpoints (requires `ADMIN` or `SUPERVISOR` role):
 
@@ -36,7 +36,8 @@ Templates are managed through the following API endpoints (requires `ADMIN` or `
 |---|---|---|
 | `GET` | `/api/email-templates` | List all templates, ordered by `type`. |
 | `POST` | `/api/email-templates` | Create a new template. Body: `{ type, subject, body }`. |
-| `PATCH` | `/api/email-templates/[id]` | Update an existing template by ID. |
+| `PUT` | `/api/email-templates/[id]` | Update subject, body, and/or active flag on an existing template. |
+| `DELETE` | `/api/email-templates/[id]` | Permanently delete a template by ID. |
 
 ---
 
@@ -50,9 +51,10 @@ Sent to a newly created user to deliver their temporary password. The recipient 
 
 | Variable | Description |
 |---|---|
-| `{{nombre}}` | The user's full name. |
-| `{{email}}` | The user's email address. |
-| `{{temp_password}}` | The system-generated temporary password. |
+| `{nombre_completo}` | The user's full name. |
+| `{primer_nombre}` | The user's first name (used for a personal greeting). |
+| `{email}` | The user's email address. |
+| `{contraseña}` | The system-generated temporary password. |
 
 ---
 
@@ -64,26 +66,26 @@ Sent to administrators and supervisors when a new support ticket is opened in th
 
 | Variable | Description |
 |---|---|
-| `{{id_ticket}}` | The unique ticket ID. |
-| `{{motivo}}` | The reason/title of the ticket. |
-| `{{reportador_completo}}` | Full name of the user who reported the ticket. |
-| `{{primer_nombre_reportador}}` | First name of the reporter (used for a personal greeting). |
-| `{{prioridad}}` | Ticket priority: `LOW`, `MEDIUM`, `HIGH`, or `CRITICAL`. |
-| `{{planta}}` | The plant (facility) where the dispenser is located. |
-| `{{ubicacion}}` | The specific location within the plant. |
+| `{id_ticket}` | The unique ticket ID. |
+| `{motivo}` | The reason/title of the ticket. |
+| `{reportador_completo}` | Full name of the user who reported the ticket. |
+| `{primer_nombre_reportador}` | First name of the reporter (used for a personal greeting). |
+| `{prioridad}` | Ticket priority: `LOW`, `MEDIUM`, `HIGH`, or `CRITICAL`. |
+| `{planta}` | The plant (facility) where the dispenser is located. |
+| `{ubicacion}` | The specific location within the plant. |
 
 **Sample body:**
 
 ```
-Hola {{primer_nombre_reportador}},
+Hola {primer_nombre_reportador},
 
-Se ha creado un nuevo ticket [{{id_ticket}}] en el sistema.
+Se ha creado un nuevo ticket [{id_ticket}] en el sistema.
 
-Motivo: {{motivo}}
-Prioridad: {{prioridad}}
-Planta: {{planta}}
-Ubicación: {{ubicacion}}
-Reportado por: {{reportador_completo}}
+Motivo: {motivo}
+Prioridad: {prioridad}
+Planta: {planta}
+Ubicación: {ubicacion}
+Reportado por: {reportador_completo}
 
 Ingresá al sistema para gestionar el ticket.
 ```
@@ -92,7 +94,7 @@ Ingresá al sistema para gestionar el ticket.
 
 ## Variable Interpolation
 
-Template bodies and subject lines use double-brace syntax: `{{variable_name}}`. At send time, `sendEmail` in `lib/email.ts` replaces every placeholder with the corresponding value from the `variables` map passed by the caller:
+Template bodies and subject lines use single-brace syntax: `{variable_name}`. At send time, `sendEmail` in `lib/email.ts` replaces every placeholder with the corresponding value from the `variables` map passed by the caller:
 
 ```typescript
 for (const [key, value] of Object.entries(variables)) {
@@ -128,7 +130,7 @@ If `SMTP_HOST`, `SMTP_USER`, or `SMTP_PASS` are missing, `sendEmail` logs a warn
 
 ## Disabling Templates
 
-Setting a template's `active` field to `false` prevents that email type from being sent without removing the template record or its configuration. This is useful for temporarily suppressing a notification category — for example, disabling `TICKET_CREATED` during a maintenance window — without losing the customized subject and body.
+The `active` field on a template record can be toggled via the `PUT /api/email-templates/[id]` endpoint. Setting it to `false` marks the template as inactive in the database. Note that `sendEmail` in `lib/email.ts` only checks whether the template record exists — it does not inspect the `active` flag at send time. To suppress a notification type, the template must be deleted or the calling code must be updated accordingly.
 
 ```typescript
 // Inside sendEmail — lib/email.ts
@@ -143,5 +145,5 @@ if (!template) {
 ```
 
 <Note>
-  If a template is missing from the database or has `active: false`, HDB Service silently skips that email and returns `false` — it does not throw an error. Ensure templates are seeded during initial setup so that email notifications work from day one.
+  If a template record is missing from the database, HDB Service silently skips that email and returns `false` — it does not throw an error. Ensure templates are seeded during initial setup so that email notifications work from day one.
 </Note>

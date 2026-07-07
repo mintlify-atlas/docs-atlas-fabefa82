@@ -323,17 +323,13 @@ curl -X GET "https://your-domain.com/api/tickets/clx1a2b3c4d5e" \
 
 ---
 
-## PATCH /api/tickets/\{id\}
+## PUT /api/tickets/\{id\}
 
 Updates a ticket's status, assignment, priority, or a combination of these. Each status change creates a `TicketStatusHistory` record. SLA timestamps are tracked automatically:
 
 - Transitioning to `IN_PROGRESS` records `respondedAt` and checks the response SLA deadline.
 - Transitioning to `RESOLVED` or `CLOSED` records `resolvedAt` and checks the resolution SLA deadline.
 - Closing a ticket that was never `RESOLVED` triggers notifications to the reporter and all supervisors.
-
-<Note>
-  This endpoint also accepts `PUT`. `PATCH` and `PUT` are equivalent.
-</Note>
 
 **Required permissions:**
 - `tickets:write` for status and priority changes.
@@ -399,7 +395,7 @@ Updates a ticket's status, assignment, priority, or a combination of these. Each
 ### Example
 
 ```bash
-curl -X PATCH "https://your-domain.com/api/tickets/clx1a2b3c4d5e" \
+curl -X PUT "https://your-domain.com/api/tickets/clx1a2b3c4d5e" \
   -H "Cookie: sb-access-token=<token>" \
   -H "Content-Type: application/json" \
   -d '{

@@ -1,7 +1,7 @@
 ---
-title: "Maintenance API Endpoints — Schedules, Checklists, and Approvals"
+title: "Maintenance API — Schedules, Checklists, and Approvals"
 sidebarTitle: "Maintenance"
-description: "REST API reference for maintenance scheduling: list schedules, generate monthly plans, submit checklists, complete visits, and manage digital approval signatures."
+description: "REST API reference for maintenance scheduling: list schedules, generate monthly plans, submit checklists, complete visits, and verify digital signatures."
 ---
 
 The Maintenance API manages the monthly preventive maintenance cycle for water dispenser fleets. Each month a batch of `MaintenanceSchedule` records is generated — one per active dispenser — and technicians then visit, complete a structured checklist, and obtain a digital signature from the customer representative. The resulting `MaintenanceApproval` carries a SHA-512 + AES-256-GCM cryptographic signature that can be independently verified without authentication.
@@ -507,9 +507,56 @@ curl -X GET "https://your-domain.com/api/maintenance/approvals?plantId=plant-abc
 
 ---
 
+## POST /api/maintenance/approvals
+
+Creates a new maintenance approval record grouping one or more completed maintenance schedules under a single digital signature session. The approval is created with an empty signature and must be subsequently signed by the customer representative on the technician's device.
+
+**Required permission:** `maintenance:write`
+
+<Note>
+  All schedule IDs listed in `scheduleIds` must already have `COMPLETED` status. Passing any schedule that is not `COMPLETED` returns `400`.
+</Note>
+
+### Request body
+
+<ParamField body="scheduleIds" type="string[]" required>
+  Non-empty array of `MaintenanceSchedule` IDs to group under this approval. All referenced schedules must be in `COMPLETED` status.
+</ParamField>
+
+### Response fields
+
+<ResponseField name="id" type="string">
+  The newly created `MaintenanceApproval` ID. Pass this to the signing UI and then to the verify endpoint.
+</ResponseField>
+
+### Example
+
+```bash
+curl -X POST "https://your-domain.com/api/maintenance/approvals" \
+  -H "Cookie: sb-access-token=<token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "scheduleIds": ["maint-sched-001", "maint-sched-002"]
+  }'
+```
+
+```json
+{ "id": "approval-xyz" }
+```
+
+### Error cases
+
+| Status | Description |
+|--------|-------------|
+| `400`  | `scheduleIds` is missing, empty, or one or more schedules are not in `COMPLETED` status. |
+| `401`  | Missing or invalid authentication session. |
+| `403`  | Caller lacks `maintenance:write`. |
+
+---
+
 ## POST /api/maintenance/approvals/\{id\}/verify
 
-Verifies the cryptographic integrity of a maintenance approval signature. The endpoint retrieves the stored `encryptedHash` and `hashPayload`, passes them to the `verifySignature` utility (SHA-512 + AES-256-GCM), and returns the verification result.
+Verifies the cryptographic integrity of a maintenance approval signature. The endpoint retrieves the stored `encryptedHash` and `hashPayload`, decrypts the hash with AES-256-GCM, recomputes the SHA-512 digest from the raw payload, and compares both using a timing-safe equality check.
 
 This endpoint requires `maintenance:read` permission to prevent unauthenticated enumeration.
 
@@ -526,15 +573,15 @@ This endpoint does not accept a request body. The approval is identified by `{id
 ### Response fields
 
 <ResponseField name="valid" type="boolean">
-  `true` if the signature cryptographically matches the stored payload; `false` if it has been tampered with or cannot be verified.
+  `true` if the decrypted stored hash matches the recomputed SHA-512 digest of the raw payload; `false` if the signature has been tampered with or decryption fails.
 </ResponseField>
 
-<ResponseField name="signedAt" type="string | null">
-  ISO 8601 timestamp of the original signing event, sourced from the verified payload.
+<ResponseField name="hash" type="string">
+  The SHA-512 hex digest recovered by decrypting the stored `encryptedHash`. Empty string on verification failure.
 </ResponseField>
 
-<ResponseField name="customerName" type="string | null">
-  Name of the customer signer, sourced from the verified payload.
+<ResponseField name="computedHash" type="string">
+  The SHA-512 hex digest freshly computed from the stored `hashPayload`. Compare with `hash` to manually audit the match. Empty string on decryption error.
 </ResponseField>
 
 ### Example
@@ -547,8 +594,8 @@ curl -X POST "https://your-domain.com/api/maintenance/approvals/approval-xyz/ver
 ```json
 {
   "valid": true,
-  "signedAt": "2024-06-15T11:30:00.000Z",
-  "customerName": "María Rodríguez"
+  "hash": "a3f9b2c1d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1",
+  "computedHash": "a3f9b2c1d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1"
 }
 ```
 

@@ -214,7 +214,7 @@ The transfer is executed inside a **database transaction** that:
 </Steps>
 
 <ResponseField name="status" type="TransferStatus">
-  Transfer lifecycle: `PENDING → COMPLETED`. Currently, all transfers created via the API are immediately marked `COMPLETED`.
+  Transfer lifecycle values: `PENDING`, `COMPLETED`, or `CANCELLED`. All transfers created via the API are immediately marked `COMPLETED`; the `PENDING` and `CANCELLED` values are reserved for future workflow extensions.
 </ResponseField>
 
 To list transfers for a plant:

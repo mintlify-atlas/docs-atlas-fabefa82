@@ -1,7 +1,7 @@
 ---
 title: "Data Hierarchy: Client, Plant, Sector, Location, Dispenser"
 sidebarTitle: "Hierarchy"
-description: "HDB Service organizes all data around a five-level hierarchy: Client → Plant → Sector → Location → Dispenser. Learn how each level relates and scopes data access."
+description: "HDB Service organizes data in a five-level hierarchy: Client → Plant → Sector → Location → Dispenser, scoping every record and user access."
 ---
 
 Every record in HDB Service — dispensers, tickets, stock entries, maintenance schedules, and users — lives within a strict five-level hierarchy: **Client → Plant → Sector → Location → Dispenser**. This hierarchy exists to model real-world installations accurately (a company may run dozens of factories, each with distinct operational zones) and to enforce data isolation automatically: users always operate within the scope of their Client and, when relevant, their assigned Plants.

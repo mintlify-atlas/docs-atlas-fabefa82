@@ -29,7 +29,7 @@ HDB Service is configured entirely via environment variables. All supported vari
 
 ## Database
 
-HDB Service uses **PostgreSQL** (hosted on Supabase) with Prisma as the ORM. Supabase exposes two connection strings: a pooled one for runtime queries and a direct one for schema migrations.
+HDB Service uses **PostgreSQL** (hosted on Supabase) with Prisma as the ORM. The `DATABASE_URL` variable holds the connection string used at runtime; Supabase recommends a pooled (PgBouncer) string here so that serverless functions do not exhaust the database connection limit.
 
 <ParamField path="DATABASE_URL" type="string" required>
   PostgreSQL connection string used by the application at runtime. Must include `sslmode=require` for Supabase.
@@ -39,16 +39,6 @@ HDB Service uses **PostgreSQL** (hosted on Supabase) with Prisma as the ORM. Sup
   ```
 
   Supabase recommends using the **pooled** (PgBouncer) connection string here so that serverless functions do not exhaust the database connection limit.
-</ParamField>
-
-<ParamField path="DIRECT_URL" type="string" required>
-  Non-pooled, direct connection string used exclusively by Prisma for schema migrations (`prisma migrate deploy`). This is required because PgBouncer does not support the advisory locks that Prisma's migration engine relies on.
-
-  ```
-  postgresql://usuario:password@direct-host:5432/hdb_service?sslmode=require
-  ```
-
-  In `prisma/schema.prisma`, this variable is wired up via the `directUrl` field of the `datasource` block.
 </ParamField>
 
 ---

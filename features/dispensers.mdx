@@ -1,7 +1,7 @@
 ---
 title: "Dispenser Management: Lifecycle, Status, and History"
 sidebarTitle: "Dispensers"
-description: "Track every water dispenser through installation, active service, repair, and retirement — with full location history, consumable records, and QR code identification."
+description: "Track every water dispenser from installation to retirement — with full location history, consumable records, repair logs, and QR code identification."
 ---
 
 Dispenser management is the core of HDB Service. Every physical water dispenser in your fleet is represented as a `Dispenser` record that carries its identity, current operational status, ownership plant, deployment location, and a rich audit trail of consumable changes, repairs, and location moves. From the moment a unit is registered until it is retired, every event is captured and queryable.
@@ -22,7 +22,7 @@ Key fields registered for every dispenser:
 | `marca` | `String` | **Required.** Brand / manufacturer name. |
 | `modelo` | `String` | **Required.** Model name or number. |
 | `numeroSerie` | `String?` | Optional manufacturer serial number. |
-| `status` | `DispenserStatus` | Current operational state (see below). Defaults to `BACKUP` on creation. |
+| `status` | `DispenserStatus` | Current operational state (see below). Always set to `BACKUP` on creation regardless of schema default. |
 | `plantId` | `String?` | The **home plant** that owns this dispenser. Persists even when the unit is deployed elsewhere. |
 | `locationId` | `String?` | The **active deployment location**. `null` when the unit is in repair, backup, or out of service. |
 | `clientId` | `String?` | The client who owns the dispenser. |
@@ -70,6 +70,9 @@ Every dispenser has a `status` field of enum type `DispenserStatus`. The status 
   </Card>
   <Card title="IN_TECHNICAL_SERVICE" icon="gear">
     Sent to an external technical service center for specialized maintenance or calibration.
+  </Card>
+  <Card title="BLOCKED_WAITING_OC" icon="clock">
+    A variant of `BLOCKED` reserved for units awaiting a purchase-order (OC) approval before returning to service. Treated identically to `BLOCKED` by the release flow — requires `dispensers:release_block` permission to transition out.
   </Card>
 </CardGroup>
 
@@ -217,7 +220,7 @@ HDB Service tracks the operational age of each dispenser, pausing the clock when
 
 The `GET /api/dispensers/[id]` response includes two computed fields:
 
-- **`lifecycleExpiration`** — absolute date when the lifecycle ends, calculated as `lifecycleStartDate + (lifecycleMonths × 30 days) + lifecycleAccumulatedPauseDays`.
+- **`lifecycleExpiration`** — absolute date when the lifecycle ends, calculated as `lifecycleStartDate + (lifecycleMonths × 30 days) + lifecycleAccumulatedPauseDays days`. If the unit is currently in `BACKUP`, the days elapsed since `lifecyclePausedAt` are also added so the clock effectively stops until it resumes.
 - **`lifecycleRemainingDays`** — days remaining until expiration. If the unit is currently paused, days since `lifecyclePausedAt` are excluded from the calculation.
 
 <Note>

@@ -1,7 +1,7 @@
 ---
-title: "SLA Enforcement and Deadline Calculation"
+title: "SLA Deadlines, Breach Detection, and Compliance Tracking"
 sidebarTitle: "SLA"
-description: "HDB Service enforces per-priority SLA deadlines on every ticket, tracks breach status in real time, and notifies stakeholders when deadlines approach or are missed."
+description: "HDB Service auto-assigns per-priority SLA deadlines to every ticket, tracks breach status in real time, and alerts ADMIN and SUPERVISOR users."
 ---
 
 Every ticket created in HDB Service is automatically assigned two SLA deadlines — a **response deadline** and a **resolution deadline** — calculated from the ticket's creation timestamp and its priority level. These deadlines are tracked in real time: the system continuously evaluates whether a ticket is on track, approaching a breach, or already breached, and sends notifications to ADMIN and SUPERVISOR users accordingly. All SLA logic lives in `lib/sla.ts` and the associated `SlaConfig` Prisma model.

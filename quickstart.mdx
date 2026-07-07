@@ -68,6 +68,10 @@ This guide walks you through everything you need to get HDB Service running on y
       The public base URL of the application. Used to construct absolute links in emails and notifications. Set to `http://localhost:3000` locally.
     </ParamField>
 
+    <ParamField body="DIRECT_URL" type="string" required>
+      The *direct* (non-pooled) PostgreSQL connection string, required by Prisma Migrate to run DDL statements that PgBouncer cannot handle. Use the direct connection string from **Supabase → Project Settings → Database** (port `5432`). Format: `postgresql://postgres.[ref]:[password]@db.[ref].supabase.co:5432/postgres`
+    </ParamField>
+
     <ParamField body="CRON_SECRET" type="string" required>
       A secret token that must be included in requests to `/api/cron` to prevent unauthorised triggering of scheduled jobs. Generate a strong random string with `openssl rand -hex 32`.
     </ParamField>

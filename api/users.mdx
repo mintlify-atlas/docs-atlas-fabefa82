@@ -140,45 +140,6 @@ curl -X POST "https://your-domain.com/api/users" \
 
 ---
 
-## GET /api/users/[id]
-
-Returns a single user's full profile, including their plant access list. The `passwordHash` field is excluded from the response.
-
-**Required role:** `ADMIN`
-
-<ResponseField name="id" type="string">User ID.</ResponseField>
-<ResponseField name="nombre" type="string">First name.</ResponseField>
-<ResponseField name="apellido" type="string">Last name (nullable).</ResponseField>
-<ResponseField name="email" type="string">Email address.</ResponseField>
-<ResponseField name="role" type="string">User role.</ResponseField>
-<ResponseField name="active" type="boolean">Whether the account is active.</ResponseField>
-<ResponseField name="clientId" type="string">Associated client ID (nullable).</ResponseField>
-<ResponseField name="mustChangePassword" type="boolean">Whether the user must change their password on next login.</ResponseField>
-<ResponseField name="onesignalPlayerId" type="string">OneSignal device player ID for push notifications (nullable).</ResponseField>
-<ResponseField name="createdAt" type="string">ISO 8601 creation timestamp.</ResponseField>
-<ResponseField name="updatedAt" type="string">ISO 8601 last-updated timestamp.</ResponseField>
-<ResponseField name="plantAccess" type="array">
-  <Expandable title="plantAccess entry fields">
-    <ResponseField name="plantId" type="string">Plant ID the user has access to.</ResponseField>
-  </Expandable>
-</ResponseField>
-
-```bash
-curl -X GET "https://your-domain.com/api/users/usr_abc123" \
-  -H "Cookie: sb-access-token=<token>"
-```
-
-**Error responses:**
-
-| Status | Description |
-|--------|-------------|
-| `404` | User not found. |
-| `401` | Not authenticated. |
-| `403` | Authenticated user is not `ADMIN`. |
-| `500` | Internal server error. |
-
----
-
 ## PATCH /api/users/[id]
 
 Updates one or more fields on an existing user. Only fields present in the request body are modified; omitted fields are left unchanged. If `plantIds` is included, the existing `UserPlantAccess` records for this user are **fully replaced** (all deleted and recreated from the new array). If a new `password` is provided, it is hashed with bcrypt and `mustChangePassword` is set to `true`. Relevant changes (name, role, password) are also synced to Supabase Auth metadata.
@@ -194,7 +155,6 @@ An `ADMIN` cannot deactivate their own account (`active: false` on the currently
 <ParamField body="plantIds" type="string[]">Full replacement list of plant IDs for access control. All previous `UserPlantAccess` entries are deleted and replaced with this list.</ParamField>
 <ParamField body="active" type="boolean">Set to `false` to deactivate the account.</ParamField>
 <ParamField body="password" type="string">New password. Will be hashed and will set `mustChangePassword: true`.</ParamField>
-<ParamField body="onesignalPlayerId" type="string">OneSignal device player ID for push notification targeting.</ParamField>
 
 <ResponseField name="id" type="string">User ID.</ResponseField>
 <ResponseField name="nombre" type="string">Updated first name.</ResponseField>

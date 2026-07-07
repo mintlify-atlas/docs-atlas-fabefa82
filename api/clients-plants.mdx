@@ -145,13 +145,9 @@ curl -X GET "https://your-domain.com/api/clients/client_abc" \
 
 ---
 
-## PATCH /api/clients/[id]
+## PUT /api/clients/[id]
 
 Updates one or more fields on an existing client. Only fields present in the request body are updated; omitted fields are left unchanged. Setting `active: false` effectively deactivates the client. All changes are recorded in the audit log.
-
-<Note>
-  The source implements this as `PUT` internally. Pass only the fields you wish to change.
-</Note>
 
 **Required permission:** `clients:write`
 
@@ -170,7 +166,7 @@ Updates one or more fields on an existing client. Only fields present in the req
 <ResponseField name="updatedAt" type="string">ISO 8601 last-updated timestamp.</ResponseField>
 
 ```bash
-curl -X PATCH "https://your-domain.com/api/clients/client_abc" \
+curl -X PUT "https://your-domain.com/api/clients/client_abc" \
   -H "Content-Type: application/json" \
   -H "Cookie: sb-access-token=<token>" \
   -d '{"telefono": "+54 11 9999-0000"}'
@@ -316,45 +312,9 @@ curl -X POST "https://your-domain.com/api/plants" \
 
 ---
 
-## GET /api/plants/[id]
-
-Returns a single plant record by ID.
-
-**Required permission:** `plants:read`
-
-<ResponseField name="id" type="string">Plant ID.</ResponseField>
-<ResponseField name="clientId" type="string">Parent client ID.</ResponseField>
-<ResponseField name="nombre" type="string">Plant display name.</ResponseField>
-<ResponseField name="direccion" type="string">Physical address (nullable).</ResponseField>
-<ResponseField name="lat" type="number">Latitude (nullable).</ResponseField>
-<ResponseField name="lng" type="number">Longitude (nullable).</ResponseField>
-<ResponseField name="active" type="boolean">Whether the plant is active.</ResponseField>
-<ResponseField name="createdAt" type="string">ISO 8601 creation timestamp.</ResponseField>
-<ResponseField name="updatedAt" type="string">ISO 8601 last-updated timestamp.</ResponseField>
-
-```bash
-curl -X GET "https://your-domain.com/api/plants/plant_xyz" \
-  -H "Cookie: sb-access-token=<token>"
-```
-
-**Error responses:**
-
-| Status | Description |
-|--------|-------------|
-| `404` | Plant not found. |
-| `401` | Not authenticated. |
-| `403` | Insufficient permission (`plants:read` required). |
-| `500` | Internal server error. |
-
----
-
-## PATCH /api/plants/[id]
+## PUT /api/plants/[id]
 
 Updates one or more fields on an existing plant. Only fields present in the request body are updated. Setting `active: false` effectively deactivates the plant. All changes are recorded in the audit log.
-
-<Note>
-  The source implements this as `PUT` internally. Pass only the fields you wish to change.
-</Note>
 
 **Required permission:** `plants:write`
 
@@ -369,10 +329,36 @@ Updates one or more fields on an existing plant. Only fields present in the requ
 <ResponseField name="updatedAt" type="string">ISO 8601 last-updated timestamp.</ResponseField>
 
 ```bash
-curl -X PATCH "https://your-domain.com/api/plants/plant_xyz" \
+curl -X PUT "https://your-domain.com/api/plants/plant_xyz" \
   -H "Content-Type: application/json" \
   -H "Cookie: sb-access-token=<token>" \
   -d '{"nombre": "Planta Norte II"}'
+```
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `404` | Plant not found. |
+| `401` | Not authenticated. |
+| `403` | Insufficient permission (`plants:write` required). |
+| `500` | Internal server error. |
+
+---
+
+## DELETE /api/plants/[id]
+
+Soft-deletes a plant by setting `active: false`. The plant record and all related data are retained in the database. The action is recorded in the audit log.
+
+**Required permission:** `plants:write`
+
+<ResponseField name="id" type="string">Plant ID.</ResponseField>
+<ResponseField name="active" type="boolean">Always `false` after a successful delete.</ResponseField>
+<ResponseField name="updatedAt" type="string">ISO 8601 timestamp of deactivation.</ResponseField>
+
+```bash
+curl -X DELETE "https://your-domain.com/api/plants/plant_xyz" \
+  -H "Cookie: sb-access-token=<token>"
 ```
 
 **Error responses:**
@@ -517,45 +503,9 @@ curl -X POST "https://your-domain.com/api/locations" \
 
 ---
 
-## GET /api/locations/[id]
-
-Returns a single location by its unique ID.
-
-**Required permission:** `locations:read`
-
-<ResponseField name="id" type="string">Location ID.</ResponseField>
-<ResponseField name="plantId" type="string">Parent plant ID.</ResponseField>
-<ResponseField name="sectorId" type="string">Sector ID (nullable).</ResponseField>
-<ResponseField name="nombre" type="string">Location display name.</ResponseField>
-<ResponseField name="piso" type="string">Floor (nullable).</ResponseField>
-<ResponseField name="area" type="string">Area (nullable).</ResponseField>
-<ResponseField name="descripcion" type="string">Description (nullable).</ResponseField>
-<ResponseField name="active" type="boolean">Whether the location is active.</ResponseField>
-<ResponseField name="updatedAt" type="string">ISO 8601 last-updated timestamp.</ResponseField>
-
-```bash
-curl -X GET "https://your-domain.com/api/locations/LOC-042" \
-  -H "Cookie: sb-access-token=<token>"
-```
-
-**Error responses:**
-
-| Status | Description |
-|--------|-------------|
-| `404` | Location not found. |
-| `401` | Not authenticated. |
-| `403` | Insufficient permission (`locations:read` required). |
-| `500` | Internal server error. |
-
----
-
-## PATCH /api/locations/[id]
+## PUT /api/locations/[id]
 
 Updates one or more fields on an existing location. Only fields present in the request body are modified. Setting `active: false` deactivates the location. Changes are recorded in the audit log.
-
-<Note>
-  The source implements this as `PUT` internally. Pass only the fields you wish to change.
-</Note>
 
 **Required permission:** `locations:write`
 
@@ -573,10 +523,36 @@ Updates one or more fields on an existing location. Only fields present in the r
 <ResponseField name="updatedAt" type="string">ISO 8601 last-updated timestamp.</ResponseField>
 
 ```bash
-curl -X PATCH "https://your-domain.com/api/locations/LOC-042" \
+curl -X PUT "https://your-domain.com/api/locations/LOC-042" \
   -H "Content-Type: application/json" \
   -H "Cookie: sb-access-token=<token>" \
   -d '{"piso": "1", "area": "Comedor"}'
+```
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `404` | Location not found. |
+| `401` | Not authenticated. |
+| `403` | Insufficient permission (`locations:write` required). |
+| `500` | Internal server error. |
+
+---
+
+## DELETE /api/locations/[id]
+
+Soft-deletes a location by setting `active: false`. The location record is retained in the database. The action is recorded in the audit log.
+
+**Required permission:** `locations:write`
+
+<ResponseField name="id" type="string">Location ID.</ResponseField>
+<ResponseField name="active" type="boolean">Always `false` after a successful delete.</ResponseField>
+<ResponseField name="updatedAt" type="string">ISO 8601 timestamp of deactivation.</ResponseField>
+
+```bash
+curl -X DELETE "https://your-domain.com/api/locations/LOC-042" \
+  -H "Cookie: sb-access-token=<token>"
 ```
 
 **Error responses:**
@@ -667,6 +643,66 @@ curl -X POST "https://your-domain.com/api/sectors" \
 | Status | Description |
 |--------|-------------|
 | `400` | `nombre` is missing or blank. |
+| `401` | Not authenticated. |
+| `403` | Insufficient permission (`sectors:write` required). |
+| `500` | Internal server error. |
+
+---
+
+## PUT /api/sectors/[id]
+
+Updates one or more fields on an existing sector. Only fields present in the request body are modified. Setting `active: false` deactivates the sector. Changes are recorded in the audit log.
+
+**Required permission:** `sectors:write`
+
+<ParamField body="nombre" type="string">New display name.</ParamField>
+<ParamField body="descripcion" type="string">Updated description. Pass `null` to clear.</ParamField>
+<ParamField body="active" type="boolean">Set to `false` to deactivate the sector.</ParamField>
+
+<ResponseField name="id" type="string">Sector ID.</ResponseField>
+<ResponseField name="nombre" type="string">Updated display name.</ResponseField>
+<ResponseField name="descripcion" type="string">Updated description (nullable).</ResponseField>
+<ResponseField name="active" type="boolean">Current active state.</ResponseField>
+<ResponseField name="updatedAt" type="string">ISO 8601 last-updated timestamp.</ResponseField>
+
+```bash
+curl -X PUT "https://your-domain.com/api/sectors/sector_admin" \
+  -H "Content-Type: application/json" \
+  -H "Cookie: sb-access-token=<token>" \
+  -d '{"nombre": "Administración Central"}'
+```
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `404` | Sector not found. |
+| `401` | Not authenticated. |
+| `403` | Insufficient permission (`sectors:write` required). |
+| `500` | Internal server error. |
+
+---
+
+## DELETE /api/sectors/[id]
+
+Soft-deletes a sector by setting `active: false`. The sector record is retained in the database. The action is recorded in the audit log.
+
+**Required permission:** `sectors:write`
+
+<ResponseField name="id" type="string">Sector ID.</ResponseField>
+<ResponseField name="active" type="boolean">Always `false` after a successful delete.</ResponseField>
+<ResponseField name="updatedAt" type="string">ISO 8601 timestamp of deactivation.</ResponseField>
+
+```bash
+curl -X DELETE "https://your-domain.com/api/sectors/sector_admin" \
+  -H "Cookie: sb-access-token=<token>"
+```
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `404` | Sector not found. |
 | `401` | Not authenticated. |
 | `403` | Insufficient permission (`sectors:write` required). |
 | `500` | Internal server error. |

@@ -1,7 +1,7 @@
 ---
 title: "Ticketing System: Incidents, SLA, and Notifications"
 sidebarTitle: "Tickets"
-description: "Log service incidents against dispensers or locations, assign technicians, track SLA compliance, and receive push and email notifications at every status change."
+description: "Report incidents against dispensers or locations, assign technicians, track SLA compliance, and receive push and email notifications on status changes."
 ---
 
 The ticketing system is the primary channel for reporting and resolving service incidents across the water dispenser fleet. Any authenticated user — from an on-floor `CLIENT_REQUESTER` to an `ADMIN` — can open a ticket against a dispenser or a location. From the moment a ticket is created, HDB Service automatically calculates SLA deadlines, routes push and email notifications, and maintains a full audit trail of every status transition and comment.
@@ -81,7 +81,7 @@ The `slaStatus` query parameter on `GET /api/tickets` allows filtering by breach
 | `slaStatus` value | Behaviour |
 |---|---|
 | `BREACHED` | Returns tickets where `slaResolutionBreached = true`. |
-| `NEAR_BREACH` | Returns open/in-progress tickets whose `slaResolutionDeadline` falls within the next 2 hours and have not yet been breached. |
+| `NEAR_BREACH` | Returns non-closed tickets (`OPEN`, `IN_PROGRESS`, or `RESOLVED`) whose `slaResolutionDeadline` falls within the next 2 hours and have not yet been breached. |
 | *(omitted)* | No SLA filter applied. |
 
 Two boolean flags are persisted on the ticket record:
@@ -100,7 +100,7 @@ Two boolean flags are persisted on the ticket record:
 Tickets are assigned to a single `TECHNICIAN`-role user via the `assignedToId` field. Assignment can be set or changed by users holding the `tickets:assign` permission.
 
 ```json
-// PUT /api/tickets/:id  — assign a technician
+// PUT /api/tickets/[id]  — assign a technician
 {
   "assignedToId": "user_tech_xyz"
 }
@@ -156,11 +156,11 @@ When a ticket is created, HDB Service fires notifications on three channels simu
     All `ADMIN` and `SUPERVISOR` users who have a registered `onesignalPlayerId` receive a push notification with the ticket priority and the first 100 characters of the reason.
   </Step>
   <Step title="Email notification">
-    An email is sent using the `TICKET_CREATED` template. The email includes the ticket ID, reason, priority, plant name, and location.
+    An email is sent to all active `ADMIN` and `SUPERVISOR` users using the `TICKET_CREATED` template. The email includes the ticket ID, reason, priority, plant name, and location.
   </Step>
 </Steps>
 
-If the requester set `wantsEmailNotifications: true`, they will additionally receive an email when the ticket status changes to `RESOLVED` (using the `TICKET_RESOLVED` template).
+An email is always sent to the original reporter when the ticket status changes to `RESOLVED` (using the `TICKET_RESOLVED` template), regardless of the `wantsEmailNotifications` preference.
 
 <Tip>
   Notification delivery for push and email is performed asynchronously and does not block the `POST /api/tickets` response. A failure in notification delivery does not cause the ticket creation to fail.

@@ -16,10 +16,6 @@ Returns a list of stock entries visible to the authenticated user. Results are a
 
 **Required permission:** `stock:read`
 
-<ParamField query="clientId" type="string">
-  Filter entries by client ID. Ignored for `CLIENT_REQUESTER` users (scope is enforced server-side).
-</ParamField>
-
 <ParamField query="plantId" type="string">
   Filter entries by plant ID.
 </ParamField>
@@ -29,7 +25,7 @@ Returns a list of stock entries visible to the authenticated user. Results are a
 </ParamField>
 
 <ParamField query="lowStockOnly" type="boolean">
-  When `true`, returns only entries where `cantidad < minLevel` and `minLevel > 0`.
+  When `true`, returns only entries where `cantidad < minLevel`.
 </ParamField>
 
 <ResponseField name="id" type="string">Unique stock entry ID.</ResponseField>

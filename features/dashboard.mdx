@@ -1,7 +1,7 @@
 ---
 title: "Analytics Dashboard: Fleet Health and SLA Metrics"
 sidebarTitle: "Dashboard"
-description: "The HDB Service dashboard surfaces real-time metrics — open tickets, SLA compliance, dispenser status breakdown, low-stock alerts, maintenance overdue counts, and MTTR analytics."
+description: "Role-scoped fleet metrics covering open tickets, SLA compliance, dispenser status, low-stock alerts, maintenance overdue counts, and MTTR analytics."
 ---
 
 The HDB Service dashboard gives operators an at-a-glance view of the entire water dispenser fleet. It aggregates live data from tickets, dispensers, stock entries, and maintenance schedules into a set of purpose-built endpoints. All metrics are automatically scoped to the authenticated user's accessible plants and clients, so field technicians, client contacts, and company administrators each see a tailored picture without any manual filtering. The dashboard is accessible to every role in the system via the `dashboard:read` permission.
@@ -112,7 +112,7 @@ The response includes three top-level objects:
   Aggregated time-based KPIs.
   <Expandable title="Fields">
     <ResponseField name="sla" type="number">
-      Average hours from ticket creation to first technician action (response to the repair or ticket resolution).
+      Average hours from ticket creation to first repair action for resolved tickets. Falls back to resolution time when no associated repair record exists.
     </ResponseField>
     <ResponseField name="mttr" type="number">
       **Mean Time To Repair** — average hours from ticket creation to full resolution, for all resolved tickets.
@@ -188,9 +188,9 @@ The health score (0–100) is computed by `calculateDispenserHealth` using a wei
 | Factor | Weight | Target |
 |--------|--------|--------|
 | MTBF (months between failures) | 30% | ≥ 6 months |
-| MTTR (hours to repair) | 20% | ≤ 24 hours |
+| MTTR (hours to repair) | 20% | ≤ 48 hours (score reaches 0 at 48 h) |
 | Maintenance condition rating | 20% | GOOD |
-| Failure recurrence (last 6 months) | 15% | ≤ 2 events |
+| Failure recurrence (last 6 months) | 15% | 0 recurrences (−20 pts each; zero at 5+) |
 | Lifecycle progress consumed | 15% | Near 0% |
 
 Dispensers are classified as:
@@ -210,7 +210,7 @@ Dispensers are classified as:
 The response includes:
 
 <ResponseField name="ranking" type="array">
-  All dispensers in scope, sorted ascending by score (most critical first). Each entry includes `id`, `marca`, `modelo`, `serial`, `planta`, `score`, `status`, and a `details` block with raw `mtbfDays`, `mttrHours`, `recurrences`, `condition`, and `progress` values.
+  All dispensers in scope, sorted ascending by score (most critical first). Each entry includes `id`, `marca`, `modelo`, `serial`, `planta`, `score`, `status`, and a `details` block with raw `mtbfDays`, `mtbfMonths`, `mttrHours`, `recurrences`, `condition`, `progress`, `ownerPlantId`, and `currentPlantId` values.
 </ResponseField>
 
 <ResponseField name="distribution" type="object">

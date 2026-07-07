@@ -1,7 +1,7 @@
 ---
 title: "Preventive Maintenance Scheduling and Digital Approvals"
 sidebarTitle: "Maintenance"
-description: "HDB Service auto-generates monthly maintenance schedules for every in-service dispenser, collects digital checklists, and captures cryptographically-signed customer approvals."
+description: "Auto-generate monthly maintenance schedules, collect technician checklists, and capture cryptographically-signed customer approvals for every dispenser."
 ---
 
 The maintenance module provides a structured, auditable workflow for preventive maintenance across the entire water dispenser fleet. Every month, HDB Service generates one schedule per active dispenser, technicians submit digital checklists with photos and condition ratings, and customers sign off on completed visits using a cryptographically-secured digital signature. The complete chain of evidence — from schedule creation through to signed approval — is stored and verifiable at any time.
@@ -212,7 +212,7 @@ The `type` field controls the report template:
 The generated file is returned with `Content-Type: application/pdf` and `Content-Disposition: attachment; filename="Reporte_<type>.pdf"`.
 
 <Tip>
-  Health score is a composite metric that weighs MTBF (40%), MTTR (20%), recurrence rate (20%), inspected condition rating (10%), and theoretical lifecycle progress (10%).
+  Health score is a composite metric that weighs MTBF (30%), MTTR (20%), maintenance condition rating (20%), failure recurrence (15%), and theoretical lifecycle progress (15%).
 </Tip>
 
 ---
